@@ -1,10 +1,4 @@
-# Imports
-from analysis import modeling as md
-from analysis import plotting as pl
-from analysis.tools import conversion
-from analysis.tools import storage_config as stor
-
-emm_cache = stor.ensure_cache("emm")
+import os
 
 import ROOT
 from array import array
@@ -21,20 +15,30 @@ import matplotlib.pyplot as plt
 import random
 random_string = lambda: ''.join(random.choices('abcdefghijklmnopqrstuvwxyz', k=10))
 
+from tools import root_tools
+from tools import storage_config as stor
+
+top_dir = os.path.dirname(os.path.abspath(__file__))
+ensure_cache = lambda name, cache_dir=None: stor.ensure_cache(name, cache_dir=cache_dir)
+emm_cache = ensure_cache("emm")
+
 # Data
-def get_mgg():
-    # Get list of diphoton invariant masses
+data_dir = f"{top_dir}/data/high_mass_diphoton/"
+
+def get_data():
     triggers = {
         "2016": "HLT_DoublePhoton60",
         "2017": "HLT_DoublePhoton70",
         "2018": "HLT_DoublePhoton70",
     }
 
+    
+    # Get list of diphoton invariant masses
     mgg = []
     for year in triggers.keys():
         d = ROOT.RDataFrame(
             "diphoton/fTree",  # Name of the tree in the file
-            f"/project01/ndcms/atownse2/AN-23-135/data/hep_data/high_mass_diphoton/Data{year}/Run{year}*.root"
+            f"{data_dir}/Data{year}/Run{year}*.root"
         )
 
         # Apply selections
@@ -46,12 +50,12 @@ def get_mgg():
         mgg.extend(list(pass_kin.AsNumpy(["Diphoton.Minv"])['Diphoton.Minv']))
 
     print(f"Loaded {len(mgg)} diphoton invariant masses from data.")
-    t_mgg = conversion.to_root_tree([mgg], "mgg", ["x"], index=True)
+    t_mgg = root_tools.to_root_tree([mgg], "mgg", ["x"], index=True)
     return t_mgg
 
 def get_fine_binning():
     # Get fine histogram
-    txt_file = "/project01/ndcms/atownse2/AN-23-135/data/hep_data/high_mass_diphoton/high_mass_diphoton_EBEB.txt"
+    txt_file = f"{data_dir}/high_mass_diphoton_EBEB.txt"
 
     # Read txt file and use to fill histogram
     bins_low = []
@@ -99,7 +103,7 @@ def get_coarse_binning():
 
 # Background Models:
 class ExponentialMixtureModel:
-    name = "Hyperexponential"
+    name = "ExponentialMixtureModel"
     def __init__(self, x, n_exp, **par_specs):
 
         fitted_par_specs = {
@@ -221,7 +225,7 @@ def get_AIC_BIC_loo(k_max=4, t=None, remake=False, tag="data"):
         df = pd.read_csv(aic_bic_file)
     else:
         if t is None:
-            t = get_mgg()
+            t = get_data()
 
         n_exps = [i for i in range(1, k_max + 1)]
         results = []
@@ -283,6 +287,41 @@ def plot_AIC_BIC_loo(df=None):
     # fig.suptitle("Leave-One-Out Cross Validation")
     plt.tight_layout()
     plt.show()
+
+def fit_random_subset(tree):
+
+    bounds = (500, 4000)
+
+    lower = random.uniform(bounds[0], bounds[1])
+    upper = random.uniform(lower, bounds[1])
+
+    x = ROOT.RooRealVar("x", "x", lower, upper)
+    data = ROOT.RooDataSet("data", "data", tree, ROOT.RooArgSet(x))
+
+    rate = ROOT.RooRealVar("rate", "rate", -1e-3, -1e-1, -1e-9)
+    pdf = ROOT.RooExponential("pdf", "pdf", x, rate)
+    
+    result = pdf.fitTo(data, ROOT.RooFit.Save(True), ROOT.RooFit.PrintLevel(-1))
+
+    # Check if the fit converged
+    fit_status = result.status()  # 0 means OK
+    cov_quality = result.covQual()  # 3 is the best
+
+    if fit_status != 0 or cov_quality < 2:
+        # print(f"Fit did not converge properly: status={fit_status}, covQual={cov_quality}")
+        return None  # or np.nan or some error value
+
+    rate_val = rate.getVal()
+    return rate_val
+
+# Fit many random subsets
+import multiprocessing as mp
+
+n_subsets = 9000
+with mp.Pool(12) as pool:
+    rates = pool.map(fit_random_subset, [t_mgg] * n_subsets)
+
+rates = [rate for rate in rates if rate is not None]  # Filter out failed fits
 
 def plot_fits(
     data, x, bins,
@@ -390,7 +429,7 @@ def plot_fits(
 
 def get_bias_inputs(toy_model, n_toys, n_events_per_toy, n_exp):
 
-    cache_dir = stor.ensure_cache("emm/bias")
+    cache_dir = ensure_cache("emm/bias")
     tags = [toy_model, f"{n_toys}toys", f"{n_events_per_toy}events", f"{n_exp}exp"]
     tag = "_".join(tags)
     bias_file = os.path.join(cache_dir, f"bias_inputs_{tag}.root")

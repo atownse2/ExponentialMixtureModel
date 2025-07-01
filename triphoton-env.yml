@@ -1,0 +1,16 @@
+name: triphoton-env
+channels:
+  - conda-forge
+dependencies:
+  - root=6.30.4
+  - coffea
+  - correctionlib
+  - numba
+  - scikit-learn
+  - fsspec-xrootd
+  - nbconvert
+  - pandoc
+  - ipython
+  - ipywidgets
+  - ipympl
+  - ipykernel
