@@ -19,13 +19,14 @@ from tools import root_tools
 from tools import storage_config as stor
 
 top_dir = os.path.dirname(os.path.abspath(__file__))
-ensure_cache = lambda name, cache_dir=None: stor.ensure_cache(name, cache_dir=cache_dir)
-emm_cache = ensure_cache("emm")
+emm_cache = f"{top_dir}/cache/emm"
+if not os.path.exists(emm_cache):
+    os.makedirs(emm_cache)
 
 # Data
 data_dir = f"{top_dir}/data/high_mass_diphoton/"
 
-def get_data():
+def get_data(normalize=False):
     triggers = {
         "2016": "HLT_DoublePhoton60",
         "2017": "HLT_DoublePhoton70",
@@ -48,6 +49,9 @@ def get_data():
 
         # Get the invariant mass of the diphoton system and append to the list
         mgg.extend(list(pass_kin.AsNumpy(["Diphoton.Minv"])['Diphoton.Minv']))
+
+    if normalize:
+        mgg = (np.array(mgg) - np.min(mgg)) / np.mean(mgg)
 
     print(f"Loaded {len(mgg)} diphoton invariant masses from data.")
     t_mgg = root_tools.to_root_tree([mgg], "mgg", ["x"], index=True)
@@ -104,59 +108,131 @@ def get_coarse_binning():
 # Background Models:
 class ExponentialMixtureModel:
     name = "ExponentialMixtureModel"
-    def __init__(self, x, n_exp, **par_specs):
 
-        fitted_par_specs = {
-            "weight": (1/n_exp, 0, 1),
-            "raw_rate": (-0.0045, -1e-1, -1e-5),
-            # "raw_rate": (-60, -400, -1e-3),
-        }
+    def __init__(self, x, n_exp, data_mean, **par_specs):
 
-        for key, spec in par_specs.items():
-            if isinstance(spec, tuple):
-                fitted_par_specs[key] = spec
-            elif isinstance(spec, float):
-                _spec = fitted_par_specs[key]
-                fitted_par_specs[key] = (spec, _spec[1], _spec[2])
+        self.n_exp = n_exp
+        self.par_specs = par_specs
+        
+        # Use the data to normalize the rates
+        # Assume that a single exponential is a good fit to start
+        # So the rate = -1/(mean - min(x))
+        self.rate_scaling = -1/(data_mean - x.getMin())
+        print(f"Rate scaling factor: {self.rate_scaling}")
 
-        fitted = {}
-        other = {}
+        # Initialize parameters
+        self.init_weights()
+        self.init_rates()
 
-        ## Fitted Parameters
-        for i in range(n_exp-1):
-            fitted[f"weight_{i}"] = ROOT.RooRealVar(f"weight_{i}", f"Mixture weight {i}", *fitted_par_specs["weight"])
-        for i in range(n_exp):
-            fitted[f"raw_rate_{i}"] = ROOT.RooRealVar(f"raw_rate_{i}", f"Unordered rate {i}", *fitted_par_specs["raw_rate"])
-        
-        ## Ordered Rates for identifiability
-        ## a1, a2, a3 => a1, a1+a2, a1+a2+a3
-        for i in range(n_exp):
-            other[f"rate_{i}"] = ROOT.RooAddition(
-                f"rate_{i}",
-                f"Ordered Rate for exponential {i}",
-                ROOT.RooArgList(*[fitted[f"raw_rate_{j}"] for j in range(i+1)]))
-        
-        
-        ## Exponentials
-        for i in range(n_exp):
-            other[f"exp_{i}"] = ROOT.RooExponential(
-                f"exp_{i}",
-                f"exp_{i}", x,
-                other[f"rate_{i}"]
-                )
-        
-        ## PDFs
-        other["pdf"] = ROOT.RooAddPdf(
-            "emm_pdf",
-            "Exponential Mixture",
-            ROOT.RooArgList(*[other[f"exp_{i}"] for i in range(n_exp)]),
-            ROOT.RooArgList(*[fitted[f"weight_{i}"] for i in range(n_exp-1)]),
-            True,
+        self.init_exponentials(x)
+        self.init_pdf()
+
+        self.fitted = {}
+        self.fitted.update(self.weights)
+        self.fitted.update(self.raw_rates)
+
+    def init_weights(self):
+        self.weights = {}
+        for i in range(self.n_exp-1):
+            # If specified in par_specs, use it
+            if f"weight_{i}" in self.par_specs:
+                spec = self.par_specs[f"weight_{i}"]
+            elif "weight" in self.par_specs:
+                spec = self.par_specs["weight"]
+            else:
+                spec = (1/self.n_exp, 0, 1)
+
+            self.weights[f"weight_{i}"] = ROOT.RooRealVar(
+                f"weight_{i}",
+                f"Mixture weight {i}",
+                *spec if len(spec) > 1 else spec
+            )
+
+    def init_rates(self):
+        self.raw_rates = {}
+        for i in range(self.n_exp):
+            # If specified in par_specs, use it
+            if f"raw_rate_diff_{i}" in self.par_specs:
+                spec = self.par_specs[f"raw_rate_diff_{i}"]
+            elif "raw_rate_diff" in self.par_specs:
+                spec = self.par_specs["raw_rate_diff"]
+            else:
+                spec = (1, 0, 1000)
+            
+            self.raw_rates[f"raw_rate_diff_{i}"] = ROOT.RooRealVar(
+                f"raw_rate_diff_{i}",
+                f"Unordered rate {i}",
+                *spec if len(spec) > 1 else spec
             )
         
-        self.fitted = fitted
-        self.other = other
-        self.pdf = other["pdf"]
+        # Ordered Rates for identifiability
+        self.rates = {}
+        for i in range(self.n_exp):
+            self.raw_rates[f"raw_rate_{i}"] = ROOT.RooAddition(
+                f"raw_rate_{i}",
+                f"Ordered Rate for exponential {i}",
+                ROOT.RooArgList(*[self.raw_rates[f"raw_rate_diff_{j}"] for j in range(i+1)])
+            )
+            
+            # Scale the rates by the rate scaling factor
+            self.rates[f"rate_{i}"] = ROOT.RooFormulaVar(
+                f"rate_{i}",
+                f"Rate scaled by data",
+                f"{self.rate_scaling}*raw_rate_{i}",
+                ROOT.RooArgList(self.raw_rates[f"raw_rate_{i}"])
+            )
+    
+    def init_exponentials(self, x):
+        self.exponentials = {}
+        for i in range(self.n_exp):
+            self.exponentials[f"exp_{i}"] = ROOT.RooExponential(
+                f"exp_{i}",
+                f"exp_{i}", x,
+                self.rates[f"rate_{i}"]
+            )
+    
+    def init_pdf(self):
+        self.pdf = ROOT.RooAddPdf(
+            "emm_pdf",
+            "Exponential Mixture",
+            ROOT.RooArgList(*[self.exponentials[f"exp_{i}"] for i in range(self.n_exp)]),
+            ROOT.RooArgList(*[self.weights[f"weight_{i}"] for i in range(self.n_exp-1)]),
+            False
+            # True
+        )
+
+
+
+class ExponentialMixtureModel_Penalty(ExponentialMixtureModel):
+    name = "ExponentialMixtureModel_Penalty"
+    def __init__(self, x, n_exp, data, penalty=0.0005, **par_specs):
+        super().__init__(x, n_exp, data, **par_specs)
+
+        # Penalty term
+        self.penalty_terms = {}
+        for i in range(n_exp):
+            self.penalty_terms[f"penalty_term_{i}"] = ROOT.RooFormulaVar(
+                f"penalty_term_{i}",
+                f"{penalty}/raw_rate_diff_{i}",
+                ROOT.RooArgList(self.raw_rates[f"raw_rate_diff_{i}"])
+            )
+            
+        self.penalty = ROOT.RooFormulaVar(
+            "penalty",
+            "Penalty for Exponential Mixture",
+            "+".join([f"penalty_term_{i}" for i in range(n_exp)]),
+            ROOT.RooArgList(*[self.penalty_terms[f"penalty_term_{i}"] for i in range(n_exp)])
+        )
+
+class ExponentialMixtureModel_Penalty_LooseTail(ExponentialMixtureModel_Penalty):
+
+    name = "ExponentialMixtureModel_Penalty_LooseTail"
+    def __init__(self, x, n_exp, penalty=0.0005, tail_prob=0.01, **par_specs):
+        super().__init__(x, n_exp, penalty=penalty, **par_specs)
+
+        self.fitted["weight_0"] = ROOT.RooRealVar("weight_0", "Mixture weight 0", tail_prob/2, 0, tail_prob)
+        # fitted["weight_0"].setConstant(True)
+
 
 class Dijet:
     name="Dijet"
@@ -314,25 +390,42 @@ def fit_random_subset(tree):
     rate_val = rate.getVal()
     return rate_val
 
-# Fit many random subsets
-import multiprocessing as mp
+def fit_random_subsets(t_mgg, n_subsets=1000):
+    pass
+    #     """
+    #     Fit many random subsets of the data to estimate the rate parameter.
+    #     """
+    #     rates = []
+    #     for _ in range(n_subsets):
+    #         rate = fit_random_subset(t_mgg)
+    #         if rate is not None:
+    #             rates.append(rate)
+        
+    #     return rates
+    # # Fit many random subsets
+    # import multiprocessing as mp
 
-n_subsets = 9000
-with mp.Pool(12) as pool:
-    rates = pool.map(fit_random_subset, [t_mgg] * n_subsets)
+    # with mp.Pool(12) as pool:
+    #     rates = pool.map(fit_random_subset, [t_mgg] * n_subsets)
 
-rates = [rate for rate in rates if rate is not None]  # Filter out failed fits
+    # rates = [rate for rate in rates if rate is not None]  # Filter out failed fits
 
 def plot_fits(
-    data, x, bins,
+    data, x, #bins,
     models,
     model_labels,
     fit_results,
+    logx=False,
+    nbins=128,
     colors = [ROOT.kBlue, ROOT.kRed, ROOT.kMagenta, ROOT.kCyan],
     ):
 
-    c = ROOT.TCanvas(random_string(), "canvas", 800, 800)
+    c = ROOT.TCanvas(random_string(), "canvas", 1600, 800)
     c.cd()
+
+    # Set binning
+    binning = ROOT.RooBinning(nbins, x.getMin(), x.getMax())
+    x.setBinning(binning)
 
     # Frames
     main_frame = x.frame(ROOT.RooFit.Title("Diphoton Mass Fit"))
@@ -376,7 +469,7 @@ def plot_fits(
                 main_frame,
                 ROOT.RooFit.VisualizeError(fit_result, 1),
                 ROOT.RooFit.FillColor(colors[i]-10),
-                ROOT.RooFit.MoveToBack()
+                ROOT.RooFit.MoveToBack(),
             )
         
         # Pull
@@ -395,11 +488,13 @@ def plot_fits(
     pull_pad = ROOT.TPad("pull_pad", "Pull Pad", 0, 0, 1, 0.3)
 
     main_pad.SetLogy()
-    main_pad.SetLogx()
+    if logx:
+        main_pad.SetLogx()
     main_pad.SetBottomMargin(0)
     main_pad.Draw()
 
-    pull_pad.SetLogx()
+    if logx:
+        pull_pad.SetLogx()
     pull_pad.SetTopMargin(0)
     pull_pad.SetBottomMargin(0.35)
     pull_pad.Draw()
@@ -424,8 +519,75 @@ def plot_fits(
     # zero_line.Draw()
 
     c.Update()
-    c.Draw()
+    cache_file = f"{emm_cache}/fit_results_{random_string()}.png"
+    c.SaveAs(cache_file)
 
+    # Show png from cache file
+    import matplotlib.pyplot as plt
+    import matplotlib.image as mpimg
+
+    # Replace this with your actual file path
+    img = mpimg.imread(cache_file)
+    fig, ax = plt.subplots(figsize=(12, 6))
+
+    ax.imshow(img)
+    ax.axis('off')  # Optional: hides axis ticks and labels
+    # plt.show()
+
+def plot_correlation_matrix(fit_result, title="Correlation Matrix", save_path=None):
+    """
+    Plot the correlation matrix from a RooFit result using matplotlib.
+    """
+    corr_matrix = fit_result.correlationMatrix()
+    
+    # Get parameter names from the fit result
+    param_names = []
+    for i in range(fit_result.floatParsFinal().getSize()):
+        param = fit_result.floatParsFinal().at(i)
+        param_names.append(param.GetName())
+    
+    # Convert ROOT matrix to numpy array
+    n_params = corr_matrix.GetNrows()
+    corr_array = np.zeros((n_params, n_params))
+    
+    for i in range(n_params):
+        for j in range(n_params):
+            corr_array[i, j] = corr_matrix[i][j]
+    
+    # Create matplotlib figure
+    fig, ax = plt.subplots(figsize=(8, 6))
+    
+    # Create heatmap
+    im = ax.imshow(corr_array, cmap='RdBu_r', vmin=-1, vmax=1, aspect='equal')
+    
+    # Set ticks and labels
+    ax.set_xticks(range(n_params))
+    ax.set_yticks(range(n_params))
+    ax.set_xticklabels(param_names, rotation=45, ha='right')
+    ax.set_yticklabels(param_names)
+    
+    # Add text annotations
+    for i in range(n_params):
+        for j in range(n_params):
+            value = corr_array[i, j]
+            text_color = 'white' if abs(value) > 0.5 else 'black'
+            ax.text(j, i, f'{value:.2f}', ha='center', va='center', 
+                   color=text_color, fontweight='bold')
+    
+    # Add colorbar
+    cbar = plt.colorbar(im, ax=ax)
+    cbar.set_label('Correlation', rotation=270, labelpad=15)
+    
+    # Set title and layout
+    ax.set_title(title)
+    plt.tight_layout()
+    
+    if save_path:
+        plt.savefig(save_path, dpi=150, bbox_inches='tight')
+    
+    plt.show()
+    
+    return fig
 
 def get_bias_inputs(toy_model, n_toys, n_events_per_toy, n_exp):
 
@@ -437,9 +599,6 @@ def get_bias_inputs(toy_model, n_toys, n_events_per_toy, n_exp):
         with open(bias_file, 'r') as f:
             bias_inputs = json.load(f)
         return bias_inputs
-    
-    if not run:
-        return None
     
     print(f"Generating bias inputs for {toy_model} with {n_toys} toys and {n_events_per_toy} events each...")
 
