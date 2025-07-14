@@ -106,63 +106,80 @@ def get_coarse_binning():
     print(h.Integral())
 
 # Background Models:
-class ExponentialMixtureModel:
+def stick_breaking_weights(n_components):
+    """
+    Generate stick-breaking weights for a mixture model.
+    """
+    stick_proportions = [
+        ROOT.RooRealVar(
+            f"v_{i}",
+            f"Stick proportion {i}",
+            0.5,  # Initial value
+            0, 1  # Bounds
+        ) for i in range(n_components - 1)
+    ]
+    stick_proportions.append(ROOT.RooRealVar(
+        f"v_{n_components-1}",
+        f"Stick proportion {n_components-1}",
+        1 # Fixed to 1
+    ))
+
+    weights = []
+    for i in range(n_components):
+        prod_terms = [f"(1-v_{j})" for j in range(i)]
+        prod_str = "*".join(prod_terms) if prod_terms else "1"
+        weight = ROOT.RooFormulaVar(
+                    f"weight_{i}",
+                    f"Weight for component {i}",
+                    f"v_{i} * {prod_str}",
+                    ROOT.RooArgList(*stick_proportions[:i+1])
+        )
+        weights.append(weight)
+    
+    return weights, stick_proportions
+
+def mixture_pdf(weights, pdfs, name="pdf"):
+    assert len(weights) == len(pdfs), "Weights and PDFs must have the same length"
+    n = len(weights)
+
+    pdf_terms = [f"{w.GetName()}*{p.GetName()}" for w, p in zip(weights, pdfs)]
+    pdf_str = "+".join(pdf_terms)
+    pdf = ROOT.RooFormulaVar(
+        name,
+        "Mixture PDF",
+        pdf_str,
+        ROOT.RooArgList(*(weights + pdfs))
+    )
+    return pdf
+
+class MixtureModel:
+    name = "GenericMixtureModel"
+    def __init__(self, x, n_components, **kwargs):
+        self.n_components = n_components
+        self.kwargs = kwargs
+        
+        self.init_weights()
+        self.init_pdfs(x)
+        self.pdf = mixture_pdf(self.weights, self.pdfs, name="pdf")
+    
+    def init_weights(self):
+        self.weights, self.stick_proportions = stick_breaking_weights(self.n_components)
+    
+    def init_pdfs(self, x):
+        raise NotImplementedError("Subclasses must implement init_pdfs")
+
+class ExponentialMixtureModel(MixtureModel):
     name = "ExponentialMixtureModel"
 
-    def __init__(self, x, n_exp, data_mean, **par_specs):
-
-        self.n_exp = n_exp
-        self.par_specs = par_specs
-        
-        # Use the data to normalize the rates
-        # Assume that a single exponential is a good fit to start
-        # So the rate = -1/(mean - min(x))
-        self.rate_scaling = -1/(data_mean - x.getMin())
-        print(f"Rate scaling factor: {self.rate_scaling}")
-
-        # Initialize parameters
-        self.init_weights()
-        self.init_rates()
-
-        self.init_exponentials(x)
-        self.init_pdf()
-
-        self.fitted = {}
-        self.fitted.update(self.weights)
-        self.fitted.update(self.raw_rates)
-
-    def init_weights(self):
-        self.weights = {}
-        for i in range(self.n_exp-1):
-            # If specified in par_specs, use it
-            if f"weight_{i}" in self.par_specs:
-                spec = self.par_specs[f"weight_{i}"]
-            elif "weight" in self.par_specs:
-                spec = self.par_specs["weight"]
-            else:
-                spec = (1/self.n_exp, 0, 1)
-
-            self.weights[f"weight_{i}"] = ROOT.RooRealVar(
-                f"weight_{i}",
-                f"Mixture weight {i}",
-                *spec if len(spec) > 1 else spec
-            )
-
-    def init_rates(self):
+    def init_rates(self, x):
+        assert "data_mean" in self.kwargs, "data_mean must be provided to initialize rates"
+        rate_scaling = -1/(self.kwargs["data_mean"] - x.getMin())
         self.raw_rates = {}
         for i in range(self.n_exp):
-            # If specified in par_specs, use it
-            if f"raw_rate_diff_{i}" in self.par_specs:
-                spec = self.par_specs[f"raw_rate_diff_{i}"]
-            elif "raw_rate_diff" in self.par_specs:
-                spec = self.par_specs["raw_rate_diff"]
-            else:
-                spec = (1, 0, 1000)
-            
             self.raw_rates[f"raw_rate_diff_{i}"] = ROOT.RooRealVar(
                 f"raw_rate_diff_{i}",
                 f"Unordered rate {i}",
-                *spec if len(spec) > 1 else spec
+                1, 0, 1000
             )
         
         # Ordered Rates for identifiability
@@ -178,7 +195,7 @@ class ExponentialMixtureModel:
             self.rates[f"rate_{i}"] = ROOT.RooFormulaVar(
                 f"rate_{i}",
                 f"Rate scaled by data",
-                f"{self.rate_scaling}*raw_rate_{i}",
+                f"{rate_scaling}*raw_rate_{i}",
                 ROOT.RooArgList(self.raw_rates[f"raw_rate_{i}"])
             )
     
@@ -409,6 +426,48 @@ def fit_random_subsets(t_mgg, n_subsets=1000):
     #     rates = pool.map(fit_random_subset, [t_mgg] * n_subsets)
 
     # rates = [rate for rate in rates if rate is not None]  # Filter out failed fits
+
+def fit(model, data, penalty=None):
+    if penalty is not None:
+        nll_base = model.pdf.createNLL(data)
+        nll = ROOT.RooFormulaVar(
+            "nll_penalty", "nll + penalty",
+            "@0 + @1", ROOT.RooArgList(nll_base, penalty)
+        )
+    else:
+        nll = model.pdf.createNLL(data)
+    
+    minimizer = ROOT.RooMinimizer(nll)
+    minimizer.minimize("Minuit2", "migrad")
+    minimizer.hesse()
+    # minimizer.minos()
+
+    fit_result = minimizer.save()
+
+    if penalty:
+        print(nll_base.getVal(), penalty.getVal(), nll.getVal())
+
+    return fit_result
+
+def fit_and_plot(model, data, x, fit_result=None, penalty=None):
+
+    if fit_result is None:
+        fit_result = fit(model, data, penalty=penalty)
+
+    plot_fits(
+        data, x,
+        [model],
+        [model.name],
+        [fit_result, None, None],
+        logx=True,
+        nbins=128,
+    )
+    plot_correlation_matrix(fit_result)
+
+    # print("nll:", nll.getVal())
+    for var_name, var in model.fitted.items():
+        print(f"{var_name}: {var.getVal()} ± {var.getError() if hasattr(var, 'getError') else 'N/A'}")
+
 
 def plot_fits(
     data, x, #bins,
