@@ -138,13 +138,38 @@ def stick_breaking_weights(n_components):
     
     return weights, stick_proportions
 
+def normalization_weights(n_components):
+    """
+    Generate normalization construction weights for a mixture model.
+    """
+    unnormalized_weights = [
+        ROOT.RooRealVar(
+            f"unnormalized_weight_{i}",
+            f"Unnormalized weight for component {i}",
+            1, 0, 1000
+        ) for i in range(n_components)
+    ]
+    unnormalized_weights[-1].setConstant(True)  # Last weight is fixed to 1
+
+    sum_weights_str = "+".join([w.GetName() for w in unnormalized_weights])
+    weights = [
+        ROOT.RooFormulaVar(
+            f"weight_{i}",
+            f"Weight for component {i}",
+            f"{unnormalized_weights[i].GetName()}/({sum_weights_str})",
+            ROOT.RooArgList(*unnormalized_weights)
+        ) for i in range(n_components)
+    ]
+    return weights, unnormalized_weights
+
+
 def mixture_pdf(weights, pdfs, name="pdf"):
     assert len(weights) == len(pdfs), "Weights and PDFs must have the same length"
     n = len(weights)
 
     pdf_terms = [f"{w.GetName()}*{p.GetName()}" for w, p in zip(weights, pdfs)]
     pdf_str = "+".join(pdf_terms)
-    pdf = ROOT.RooFormulaVar(
+    pdf = ROOT.RooGenericPdf(
         name,
         "Mixture PDF",
         pdf_str,
@@ -163,10 +188,31 @@ class MixtureModel:
         self.pdf = mixture_pdf(self.weights, self.pdfs, name="pdf")
     
     def init_weights(self):
-        self.weights, self.stick_proportions = stick_breaking_weights(self.n_components)
+        if "use_normalization_construction" in self.kwargs and self.kwargs["use_normalization_construction"]:
+            self.weights, self.raw_weights = normalization_weights(self.n_components)
+        else:
+            self.weights, self.raw_weights = stick_breaking_weights(self.n_components)
     
     def init_pdfs(self, x):
+        """
+        Initialize the PDFs for the mixture model.
+        The PDF names should be in the format "pdf_{i}" where i is the index of the component.
+        """
         raise NotImplementedError("Subclasses must implement init_pdfs")
+    
+    def print_base(self):
+        """
+        Print the model parameters.
+        """
+        print(f"Model: {self.name}")
+        print(f"Number of components: {self.n_components}")
+        print("Weights:")
+        for w in self.weights:
+            print(f"  {w.GetName()}: {w.getVal()} ± {w.getError() if hasattr(w, 'getError') else 'N/A'}")
+    
+    def print(self):
+        raise NotImplementedError("Subclasses must implement print method")
+        
 
 class ExponentialMixtureModel(MixtureModel):
     name = "ExponentialMixtureModel"
@@ -174,123 +220,94 @@ class ExponentialMixtureModel(MixtureModel):
     def init_rates(self, x):
         assert "data_mean" in self.kwargs, "data_mean must be provided to initialize rates"
         rate_scaling = -1/(self.kwargs["data_mean"] - x.getMin())
-        self.raw_rates = {}
-        for i in range(self.n_exp):
-            self.raw_rates[f"raw_rate_diff_{i}"] = ROOT.RooRealVar(
-                f"raw_rate_diff_{i}",
-                f"Unordered rate {i}",
-                1, 0, 1000
-            )
-        
-        # Ordered Rates for identifiability
-        self.rates = {}
-        for i in range(self.n_exp):
-            if "raw_rate" in self.par_specs:
-                spec = self.par_specs["raw_rate"]
-            elif f"raw_rate_{i}" in self.par_specs:
-                spec = self.par_specs[f"raw_rate_{i}"]
-            else:
-                spec = (i, 0, 1000)
 
-            self.raw_rates[f"raw_rate_{i}"] = ROOT.RooRealVar(
+        self.raw_rates = [
+            ROOT.RooRealVar(
                 f"raw_rate_{i}",
-                f"Ordered rate {i}",
-                *spec if isinstance(spec, tuple) and len(spec) > 1 else spec
-            )
-
-            # Scale the rates by the rate scaling factor
-            self.rates[f"rate_{i}"] = ROOT.RooFormulaVar(
+                f"Raw rate for exponential {i}",
+                i, 0, 1000
+            ) for i in range(self.n_components)
+        ]
+        self.rates = [
+            ROOT.RooFormulaVar(
                 f"rate_{i}",
-                f"Rate scaled by data",
+                f"Rate scaled by data for exponential {i}",
                 f"{rate_scaling}*raw_rate_{i}",
-                ROOT.RooArgList(self.raw_rates[f"raw_rate_{i}"])
-            )
+                ROOT.RooArgList(self.raw_rates[i])
+            ) for i in range(self.n_components)
+        ]
     
-    def init_exponentials(self, x):
-        self.exponentials = {}
-        for i in range(self.n_exp):
-            self.exponentials[f"exp_{i}"] = ROOT.RooExponential(
-                f"exp_{i}",
-                f"exp_{i}", x,
-                self.rates[f"rate_{i}"]
-            )
-    
-    def init_pdf(self):
-        self.pdf = ROOT.RooAddPdf(
-            "emm_pdf",
-            "Exponential Mixture",
-            ROOT.RooArgList(*[self.exponentials[f"exp_{i}"] for i in range(self.n_exp)]),
-            ROOT.RooArgList(*[self.weights[f"weight_{i}"] for i in range(self.n_exp-1)]),
-            False
-            # True
-        )
+    def init_pdfs(self, x):
+        self.init_rates(x)
 
+        if "max_tail_prob" in self.kwargs:    
+            self.weights[0].setRange(0, self.kwargs["max_tail_prob"])
+
+        self.pdfs = [
+            ROOT.RooExponential(
+                f"pdf_{i}",
+                f"Exponential PDF {i}",
+                x, self.rates[i]
+            ) for i in range(self.n_components)    
+        ]
+    
+    def print(self):
+        self.print_base()
+        print("Raw Rates:")
+        for r in self.raw_rates:
+            print(f"  {r.GetName()}: {r.getVal()} ± {r.getError() if hasattr(r, 'getError') else 'N/A'}")
 
 class ExponentialMixtureModel_Ordered(ExponentialMixtureModel):
-    def init_rates(self):
-        self.raw_rates = {}
-        for i in range(self.n_exp):
-            # If specified in par_specs, use it
-            if f"raw_rate_diff_{i}" in self.par_specs:
-                spec = self.par_specs[f"raw_rate_diff_{i}"]
-            elif "raw_rate_diff" in self.par_specs:
-                spec = self.par_specs["raw_rate_diff"]
-            else:
-                spec = (1, 1e-2, 1000)
-            
-            self.raw_rates[f"raw_rate_diff_{i}"] = ROOT.RooRealVar(
+    def init_rates(self, x):
+        assert "data_mean" in self.kwargs, "data_mean must be provided to initialize rates"
+        rate_scaling = -1/(self.kwargs["data_mean"] - x.getMin())
+
+        self.raw_rate_diffs = [
+            ROOT.RooRealVar(
                 f"raw_rate_diff_{i}",
-                f"Unordered rate {i}",
-                *spec if isinstance(spec, tuple) and len(spec) > 1 else spec
-            )
-        
-        # Ordered Rates for identifiability
-        self.rates = {}
-        for i in range(self.n_exp):
-            self.raw_rates[f"raw_rate_{i}"] = ROOT.RooAddition(
-                f"raw_rate_{i}",
-                f"Ordered Rate for exponential {i}",
-                ROOT.RooArgList(*[self.raw_rates[f"raw_rate_diff_{j}"] for j in range(i+1)])
-            )
-            
-            # Scale the rates by the rate scaling factor
-            self.rates[f"rate_{i}"] = ROOT.RooFormulaVar(
+                f"Unordered rate difference {i}",
+                1, 0, 1000
+            ) for i in range(self.n_components)
+        ]
+
+        self.rates = [
+            ROOT.RooFormulaVar(
                 f"rate_{i}",
-                f"Rate scaled by data",
-                f"{self.rate_scaling}*raw_rate_{i}",
-                ROOT.RooArgList(self.raw_rates[f"raw_rate_{i}"])
-            )
+                f"Ordered Rate for exponential {i}",
+                f"{rate_scaling}*({'+'.join([rd.GetName() for rd in self.raw_rate_diffs[:i+1]])})",
+                ROOT.RooArgList(*self.raw_rate_diffs[:i+1])
+            ) for i in range(self.n_components)
+        ]
 
+    def print(self):
+        self.print_base()
+        print("Raw Rate Differences:")
+        for r in self.raw_rate_diffs:
+            print(f"  {r.GetName()}: {r.getVal()} ± {r.getError() if hasattr(r, 'getError') else 'N/A'}")
 
-class ExponentialMixtureModel_Ordered_Penalty(ExponentialMixtureModel_Ordered):
-    name = "ExponentialMixtureModel_Ordered_Penalty"
-    def __init__(self, x, n_exp, data, penalty=0.0005, **par_specs):
-        super().__init__(x, n_exp, data, **par_specs)
+def unordered_penalty(rates, weights, penalty_strength=0.1):
+    """
+    Create a penalty term for unordered exponential rates.
+    penalty = sum_i sum_j b/(weight_i*weight_j)*1/(rates_i - rates_j)^2)
+    """
+    assert len(rates) > 1, "At least two rates are required for the penalty"
 
-        # Penalty term
-        self.penalty_terms = {}
-        for i in range(n_exp):
-            self.penalty_terms[f"penalty_term_{i}"] = ROOT.RooFormulaVar(
-                f"penalty_term_{i}",
-                f"{penalty}/raw_rate_diff_{i}",
-                ROOT.RooArgList(self.raw_rates[f"raw_rate_diff_{i}"])
-            )
+    n = len(rates)
+    penalty_terms = []
+    prefactor = lambda i, j: f"{penalty_strength}/({weights[i].GetName()}*{weights[j].GetName()})"
+    square_diff = lambda i, j: f"({rates[i].GetName()}-{rates[j].GetName()})^2"
+    for i in range(n):
+        for j in range(i+1, n):
+            penalty_terms.append(f"{prefactor(i, j)}/{square_diff(i, j)}")
+    penalty_str = "+".join(penalty_terms)
+    penalty = ROOT.RooFormulaVar(
+        "unordered_penalty",
+        "Penalty for unordered rates",
+        penalty_str,
+        ROOT.RooArgList(*(rates + weights))
+    )
+    return penalty
             
-        self.penalty = ROOT.RooFormulaVar(
-            "penalty",
-            "Penalty for Exponential Mixture",
-            "+".join([f"penalty_term_{i}" for i in range(n_exp)]),
-            ROOT.RooArgList(*[self.penalty_terms[f"penalty_term_{i}"] for i in range(n_exp)])
-        )
-
-class ExponentialMixtureModel_Ordered_LooseTail(ExponentialMixtureModel_Ordered):
-
-    name = "ExponentialMixtureModel_Ordered_LooseTail"
-    def __init__(self, x, n_exp, data_mean, tail_prob=0.01, **par_specs):
-        super().__init__(x, n_exp, data_mean, weight_0=tail_prob, **par_specs)
-
-        # self.weights["weight_0"] = ROOT.RooRealVar("weight_0", "Mixture weight 0", tail_prob/2, 0, tail_prob)
-        # fitted["weight_0"].setConstant(True)
 
 
 class Dijet:
@@ -319,14 +336,14 @@ class ExpPow:
             ROOT.RooArgList(self.p1, self.p2, x)  # Arguments for the formula
         )
 
-def AIC_BIC_loo(n_exp, t, k_folds=-1):
+def AIC_BIC_loo(n_components, t, k_folds=-1):
 
     x = ROOT.RooRealVar("x", "Diphoton Mass [GeV]", 500, 4000)
     index=ROOT.RooRealVar("index", "index", 0, 0, 1e6)
 
     data = ROOT.RooDataSet("mgg", "mgg", ROOT.RooArgSet(x, index), ROOT.RooFit.Import(t))
     
-    model_inst = ExponentialMixtureModel(x, n_exp)
+    model_inst = ExponentialMixtureModel(x, n_components)
     model = model_inst.pdf
 
     AICs = []
@@ -362,12 +379,12 @@ def get_AIC_BIC_loo(k_max=4, t=None, remake=False, tag="data"):
         if t is None:
             t = get_data()
 
-        n_exps = [i for i in range(1, k_max + 1)]
+        n_components = [i for i in range(1, k_max + 1)]
         results = []
-        with mp.Pool(len(n_exps)) as pool:
+        with mp.Pool(len(n_components)) as pool:
             results = pool.starmap(
                 AIC_BIC_loo, 
-                [(i, t) for i in n_exps]
+                [(i, t) for i in n_components]
             )
 
         # Collect results
@@ -376,7 +393,7 @@ def get_AIC_BIC_loo(k_max=4, t=None, remake=False, tag="data"):
             AIC_low, AIC_med, AIC_high = np.percentile(result["AIC"], [16, 50, 84])
             BIC_low, BIC_med, BIC_high = np.percentile(result["BIC"], [16, 50, 84])
             df.append({
-                "n_exp": n_exps[i],
+                "n_components": n_components[i],
                 "AIC_low": AIC_low,
                 "AIC_med": AIC_med,
                 "AIC_high": AIC_high,
@@ -398,7 +415,7 @@ def plot_AIC_BIC_loo(df=None):
     fig, ax = plt.subplots(1,2, figsize=(12, 5))
 
     ax[0].errorbar(
-        df['n_exp'],
+        df['n_components'],
         df['AIC_med'],
         yerr=[df['AIC_med']-df['AIC_low'], df['AIC_high']-df['AIC_med']],
         capsize=5,
@@ -406,10 +423,10 @@ def plot_AIC_BIC_loo(df=None):
     )
     ax[0].set_xlabel("k")
     ax[0].set_ylabel("AIC")
-    ax[0].set_xticks(df['n_exp'])
+    ax[0].set_xticks(df['n_components'])
 
     ax[1].errorbar(
-        df['n_exp'],
+        df['n_components'],
         df['BIC_med'],
         yerr=[df['BIC_med']-df['BIC_low'], df['BIC_high']-df['BIC_med']],
         capsize=5,
@@ -417,7 +434,7 @@ def plot_AIC_BIC_loo(df=None):
     )
     ax[1].set_xlabel("k")
     ax[1].set_ylabel("BIC")
-    ax[1].set_xticks(df['n_exp'])
+    ax[1].set_xticks(df['n_components'])
 
     # fig.suptitle("Leave-One-Out Cross Validation")
     plt.tight_layout()
@@ -505,10 +522,8 @@ def fit_and_plot(model, data, x, fit_result=None, penalty=None):
         nbins=128,
     )
     plot_correlation_matrix(fit_result)
-
-    # print("nll:", nll.getVal())
-    for var_name, var in model.fitted.items():
-        print(f"{var_name}: {var.getVal()} ± {var.getError() if hasattr(var, 'getError') else 'N/A'}")
+    if hasattr(model, 'print'):
+        model.print()
 
 
 def plot_fits(
@@ -690,10 +705,10 @@ def plot_correlation_matrix(fit_result, title="Correlation Matrix", save_path=No
     
     return fig
 
-def get_bias_inputs(toy_model, n_toys, n_events_per_toy, n_exp):
+def get_bias_inputs(toy_model, n_toys, n_events_per_toy, n_components):
 
     cache_dir = ensure_cache("emm/bias")
-    tags = [toy_model, f"{n_toys}toys", f"{n_events_per_toy}events", f"{n_exp}exp"]
+    tags = [toy_model, f"{n_toys}toys", f"{n_events_per_toy}events", f"{n_components}exp"]
     tag = "_".join(tags)
     bias_file = os.path.join(cache_dir, f"bias_inputs_{tag}.root")
     if os.path.exists(bias_file):
@@ -712,7 +727,7 @@ def get_bias_inputs(toy_model, n_toys, n_events_per_toy, n_exp):
     else:
         raise ValueError("Unsupported toy model. Use 'Dijet' or 'ExpPow'.")
 
-    model_to_fit = ExponentialMixtureModel(x, n_exp)
+    model_to_fit = ExponentialMixtureModel(x, n_components)
 
     bias_inputs = []
     for i in range(n_toys):
@@ -754,19 +769,19 @@ def get_bias_inputs(toy_model, n_toys, n_events_per_toy, n_exp):
     print(f"Saved bias inputs to cache: {bias_file}")
     return bias_inputs
 
-def get_bias_info(toy_model, n_toys, n_events_per_toy_list, n_exps):
+def get_bias_info(toy_model, n_toys, n_events_per_toy_list, n_components):
     df = []
     one = False
-    for n_exp in n_exps:
+    for n_components in n_components:
         for n_events_per_toy in n_events_per_toy_list:
             l = get_bias_inputs(
                 toy_model=toy_model,
                 n_toys=n_toys,
                 n_events_per_toy=n_events_per_toy,
-                n_exp=n_exp,
+                n_components=n_components,
             )
             if l is None:
-                print(f"No bias inputs found for n_exp={n_exp}, n_events_per_toy={n_events_per_toy}. Skipping.")
+                print(f"No bias inputs found for n_components={n_components}, n_events_per_toy={n_events_per_toy}. Skipping.")
                 continue
         
             fit_values = []
@@ -788,7 +803,7 @@ def get_bias_info(toy_model, n_toys, n_events_per_toy_list, n_exps):
             covered_percentage = np.mean(covered, axis=0) * 100  # Percentage of toys where the true value is within the error range
 
             df.append({
-                'n_exp': n_exp,
+                'n_components': n_components,
                 'n_events_per_toy': n_events_per_toy,
                 'pull_mean': pull_mean,
                 'pull_err': pull_err,
