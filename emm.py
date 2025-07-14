@@ -185,12 +185,19 @@ class ExponentialMixtureModel(MixtureModel):
         # Ordered Rates for identifiability
         self.rates = {}
         for i in range(self.n_exp):
-            self.raw_rates[f"raw_rate_{i}"] = ROOT.RooAddition(
+            if "raw_rate" in self.par_specs:
+                spec = self.par_specs["raw_rate"]
+            elif f"raw_rate_{i}" in self.par_specs:
+                spec = self.par_specs[f"raw_rate_{i}"]
+            else:
+                spec = (i, 0, 1000)
+
+            self.raw_rates[f"raw_rate_{i}"] = ROOT.RooRealVar(
                 f"raw_rate_{i}",
-                f"Ordered Rate for exponential {i}",
-                ROOT.RooArgList(*[self.raw_rates[f"raw_rate_diff_{j}"] for j in range(i+1)])
+                f"Ordered rate {i}",
+                *spec if isinstance(spec, tuple) and len(spec) > 1 else spec
             )
-            
+
             # Scale the rates by the rate scaling factor
             self.rates[f"rate_{i}"] = ROOT.RooFormulaVar(
                 f"rate_{i}",
@@ -219,9 +226,44 @@ class ExponentialMixtureModel(MixtureModel):
         )
 
 
+class ExponentialMixtureModel_Ordered(ExponentialMixtureModel):
+    def init_rates(self):
+        self.raw_rates = {}
+        for i in range(self.n_exp):
+            # If specified in par_specs, use it
+            if f"raw_rate_diff_{i}" in self.par_specs:
+                spec = self.par_specs[f"raw_rate_diff_{i}"]
+            elif "raw_rate_diff" in self.par_specs:
+                spec = self.par_specs["raw_rate_diff"]
+            else:
+                spec = (1, 1e-2, 1000)
+            
+            self.raw_rates[f"raw_rate_diff_{i}"] = ROOT.RooRealVar(
+                f"raw_rate_diff_{i}",
+                f"Unordered rate {i}",
+                *spec if isinstance(spec, tuple) and len(spec) > 1 else spec
+            )
+        
+        # Ordered Rates for identifiability
+        self.rates = {}
+        for i in range(self.n_exp):
+            self.raw_rates[f"raw_rate_{i}"] = ROOT.RooAddition(
+                f"raw_rate_{i}",
+                f"Ordered Rate for exponential {i}",
+                ROOT.RooArgList(*[self.raw_rates[f"raw_rate_diff_{j}"] for j in range(i+1)])
+            )
+            
+            # Scale the rates by the rate scaling factor
+            self.rates[f"rate_{i}"] = ROOT.RooFormulaVar(
+                f"rate_{i}",
+                f"Rate scaled by data",
+                f"{self.rate_scaling}*raw_rate_{i}",
+                ROOT.RooArgList(self.raw_rates[f"raw_rate_{i}"])
+            )
 
-class ExponentialMixtureModel_Penalty(ExponentialMixtureModel):
-    name = "ExponentialMixtureModel_Penalty"
+
+class ExponentialMixtureModel_Ordered_Penalty(ExponentialMixtureModel_Ordered):
+    name = "ExponentialMixtureModel_Ordered_Penalty"
     def __init__(self, x, n_exp, data, penalty=0.0005, **par_specs):
         super().__init__(x, n_exp, data, **par_specs)
 
@@ -241,13 +283,13 @@ class ExponentialMixtureModel_Penalty(ExponentialMixtureModel):
             ROOT.RooArgList(*[self.penalty_terms[f"penalty_term_{i}"] for i in range(n_exp)])
         )
 
-class ExponentialMixtureModel_Penalty_LooseTail(ExponentialMixtureModel_Penalty):
+class ExponentialMixtureModel_Ordered_LooseTail(ExponentialMixtureModel_Ordered):
 
-    name = "ExponentialMixtureModel_Penalty_LooseTail"
-    def __init__(self, x, n_exp, penalty=0.0005, tail_prob=0.01, **par_specs):
-        super().__init__(x, n_exp, penalty=penalty, **par_specs)
+    name = "ExponentialMixtureModel_Ordered_LooseTail"
+    def __init__(self, x, n_exp, data_mean, tail_prob=0.01, **par_specs):
+        super().__init__(x, n_exp, data_mean, weight_0=tail_prob, **par_specs)
 
-        self.fitted["weight_0"] = ROOT.RooRealVar("weight_0", "Mixture weight 0", tail_prob/2, 0, tail_prob)
+        # self.weights["weight_0"] = ROOT.RooRealVar("weight_0", "Mixture weight 0", tail_prob/2, 0, tail_prob)
         # fitted["weight_0"].setConstant(True)
 
 
@@ -578,7 +620,7 @@ def plot_fits(
     # zero_line.Draw()
 
     c.Update()
-    cache_file = f"{emm_cache}/fit_results_{random_string()}.png"
+    cache_file = f"{emm_cache}/fit.png"
     c.SaveAs(cache_file)
 
     # Show png from cache file
