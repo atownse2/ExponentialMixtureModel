@@ -225,7 +225,7 @@ class ExponentialMixtureModel(MixtureModel):
             ROOT.RooRealVar(
                 f"raw_rate_{i}",
                 f"Raw rate for exponential {i}",
-                i, 0, 1000
+                i, 0, 10000
             ) for i in range(self.n_components)
         ]
         self.rates = [
@@ -498,8 +498,8 @@ def fit(model, data, penalty=None):
     
     minimizer = ROOT.RooMinimizer(nll)
     minimizer.minimize("Minuit2", "migrad")
-    minimizer.hesse()
-    # minimizer.minos()
+    # minimizer.hesse()
+    minimizer.minos()
 
     fit_result = minimizer.save()
 
