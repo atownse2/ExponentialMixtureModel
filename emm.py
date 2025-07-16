@@ -1,4 +1,5 @@
 import os
+import time
 
 import ROOT
 from array import array
@@ -26,7 +27,7 @@ if not os.path.exists(emm_cache):
 # Data
 data_dir = f"{top_dir}/data/high_mass_diphoton/"
 
-def get_data(normalize=False):
+def get_data(normalize=False, sort_and_index=False):
     triggers = {
         "2016": "HLT_DoublePhoton60",
         "2017": "HLT_DoublePhoton70",
@@ -52,9 +53,13 @@ def get_data(normalize=False):
 
     if normalize:
         mgg = (np.array(mgg) - np.min(mgg)) / np.mean(mgg)
-
+    
     print(f"Loaded {len(mgg)} diphoton invariant masses from data.")
-    t_mgg = root_tools.to_root_tree([mgg], "mgg", ["x"], index=True)
+    if sort_and_index:
+        mgg = np.sort(mgg)
+        t_mgg = root_tools.to_root_tree([mgg], "mgg", ["x"], index=True)
+    else:
+        t_mgg = root_tools.to_root_tree([mgg], "mgg", ["x"], index=True)
     return t_mgg
 
 def get_fine_binning():
@@ -221,21 +226,43 @@ class ExponentialMixtureModel(MixtureModel):
         assert "data_mean" in self.kwargs, "data_mean must be provided to initialize rates"
         rate_scaling = -1/(self.kwargs["data_mean"] - x.getMin())
 
-        self.raw_rates = [
-            ROOT.RooRealVar(
-                f"raw_rate_{i}",
-                f"Raw rate for exponential {i}",
-                i, 0, 10000
-            ) for i in range(self.n_components)
-        ]
-        self.rates = [
-            ROOT.RooFormulaVar(
-                f"rate_{i}",
-                f"Rate scaled by data for exponential {i}",
-                f"{rate_scaling}*raw_rate_{i}",
-                ROOT.RooArgList(self.raw_rates[i])
-            ) for i in range(self.n_components)
-        ]
+        # Initialize raw rates
+        if self.kwargs.get("exponential_transform", False):
+            self.raw_rates = []
+            for i in range(self.n_components):
+                r = ROOT.RooRealVar(
+                    f"raw_rate_{i}",
+                    f"Raw rate for exponential {i}",
+                    0,
+                )
+                r.setConstant(False)
+                self.raw_rates.append(r)
+            
+            self.rates = [
+                ROOT.RooFormulaVar(
+                    f"rate_{i}",
+                    f"Rate scaled by data for exponential {i}",
+                    f"{rate_scaling}*exp(raw_rate_{i})",
+                    ROOT.RooArgList(self.raw_rates[i])
+                ) for i in range(self.n_components)
+            ]
+
+        else:
+            self.raw_rates = [
+                ROOT.RooRealVar(
+                    f"raw_rate_{i}",
+                    f"Raw rate for exponential {i}",
+                    i, 0, 10000
+                ) for i in range(self.n_components)
+            ]
+            self.rates = [
+                ROOT.RooFormulaVar(
+                    f"rate_{i}",
+                    f"Rate scaled by data for exponential {i}",
+                    f"{rate_scaling}*raw_rate_{i}",
+                    ROOT.RooArgList(self.raw_rates[i])
+                ) for i in range(self.n_components)
+            ]
     
     def init_pdfs(self, x):
         self.init_rates(x)
@@ -262,19 +289,41 @@ class ExponentialMixtureModel_Ordered(ExponentialMixtureModel):
         assert "data_mean" in self.kwargs, "data_mean must be provided to initialize rates"
         rate_scaling = -1/(self.kwargs["data_mean"] - x.getMin())
 
+        # self.raw_rate_diffs = [
+        #     ROOT.RooRealVar(
+        #         f"raw_rate_diff_{i}",
+        #         f"Unordered rate difference {i}",
+        #         1, 0, 10000
+        #     ) for i in range(self.n_components)
+        # ]
+
+        # self.rates = [
+        #     ROOT.RooFormulaVar(
+        #         f"rate_{i}",
+        #         f"Ordered Rate for exponential {i}",
+        #         f"{rate_scaling}*({'+'.join([rd.GetName() for rd in self.raw_rate_diffs[:i+1]])})",
+        #         ROOT.RooArgList(*self.raw_rate_diffs[:i+1])
+        #     ) for i in range(self.n_components)
+        # ]
+
+        # I want to invert the ordering of the rates so that the largest rate is the most independent
+        # Right now it is the opposite. I could take the inverse of the sum but I need to get the scaling right
+        # rate_0 = rate_scaling/(raw_rate_diff_0)
+        # rate_1 = rate_scaling/(raw_rate_diff_0 + raw_rate_diff_1)
+        # rate_2 = rate_scaling/(raw_rate_diff_0 + raw_rate_diff_1 + raw_rate_diff_2)
         self.raw_rate_diffs = [
             ROOT.RooRealVar(
                 f"raw_rate_diff_{i}",
-                f"Unordered rate difference {i}",
-                1, 0, 1000
-            ) for i in range(self.n_components)
+                f"Inverse rate difference {i}",
+                1, 0, 10000
+            ) for i in range(self.n_components - 1)
         ]
 
         self.rates = [
             ROOT.RooFormulaVar(
                 f"rate_{i}",
                 f"Ordered Rate for exponential {i}",
-                f"{rate_scaling}*({'+'.join([rd.GetName() for rd in self.raw_rate_diffs[:i+1]])})",
+                f"{rate_scaling}/({'+'.join([rd.GetName() for rd in self.raw_rate_diffs[:i+1]])})",
                 ROOT.RooArgList(*self.raw_rate_diffs[:i+1])
             ) for i in range(self.n_components)
         ]
@@ -284,6 +333,46 @@ class ExponentialMixtureModel_Ordered(ExponentialMixtureModel):
         print("Raw Rate Differences:")
         for r in self.raw_rate_diffs:
             print(f"  {r.GetName()}: {r.getVal()} ± {r.getError() if hasattr(r, 'getError') else 'N/A'}")
+
+def SCAD_penalty(weights, penalty_strength=0.1):
+    """
+    Create a SCAD penalty term for the weights.
+    """
+    assert len(weights) > 0, "At least one weight is required for the penalty"
+
+    t = penalty_strength
+    a = 3.7 # SCAD parameter Fan and Li (2001)
+
+    SCAD = lambda w: f"({w}<{t})*{t}*{w} + ({w}>{t} && {w}<={a}*{t})*TMath::Sq({a}*{t}-{w})/(2*({a}-1)) + ({w}>{a}*{t})*TMath::Sq({t})*({a}+1)/2"
+
+    penalty_terms = []
+    for w in weights:
+        penalty_terms.append(SCAD(w.GetName()))
+    
+    penalty_str = "+".join(penalty_terms)
+    penalty = ROOT.RooFormulaVar(
+        "SCAD_penalty",
+        "SCAD penalty for weights",
+        penalty_str,
+        ROOT.RooArgList(*weights)
+    )
+    return penalty
+
+def weight_penalty(weights, penalty_strength=0.1):
+    """
+    Create a penalty term for the weights.
+    """
+    assert len(weights) > 0, "At least one weight is required for the penalty"
+
+    penalty_terms = [f"{penalty_strength}*{w.GetName()}" for w in weights]
+    penalty_str = "+".join(penalty_terms)
+    penalty = ROOT.RooFormulaVar(
+        "weight_penalty",
+        "Penalty for weights",
+        penalty_str,
+        ROOT.RooArgList(*weights)
+    )
+    return penalty
 
 def unordered_penalty(rates, weights, penalty_strength=0.1):
     """
@@ -308,7 +397,27 @@ def unordered_penalty(rates, weights, penalty_strength=0.1):
     )
     return penalty
             
+def ordered_penalty(rate_diffs, weights, penalty_strength=0.1):
+    """
+    Create a penalty term for ordered exponential rates.
+    penalty = sum_i b/(weight_i*weight_{i+1})*1/(rate_diff_i)^2
+    """
+    assert len(rate_diffs) > 1, "At least two rate differences are required for the penalty"
 
+    n = len(rate_diffs)
+    penalty_terms = []
+    prefactor = lambda i: f"{penalty_strength}/({weights[i].GetName()}"
+    square_diff = lambda i: f"({rate_diffs[i].GetName()})^2"
+    for i in range(n):
+        penalty_terms.append(f"{prefactor(i)}*{square_diff(i)})")
+    penalty_str = "+".join(penalty_terms)
+    penalty = ROOT.RooFormulaVar(
+        "ordered_penalty",
+        "Penalty for ordered rates",
+        penalty_str,
+        ROOT.RooArgList(*(rate_diffs + weights))
+    )
+    return penalty
 
 class Dijet:
     name="Dijet"
@@ -486,7 +595,8 @@ def fit_random_subsets(t_mgg, n_subsets=1000):
 
     # rates = [rate for rate in rates if rate is not None]  # Filter out failed fits
 
-def fit(model, data, penalty=None):
+def fit(model, data, penalty=None, minos=True, quiet=False):
+    t1 = time.time()
     if penalty is not None:
         nll_base = model.pdf.createNLL(data)
         nll = ROOT.RooFormulaVar(
@@ -497,18 +607,31 @@ def fit(model, data, penalty=None):
         nll = model.pdf.createNLL(data)
     
     minimizer = ROOT.RooMinimizer(nll)
+    if quiet:
+        minimizer.setPrintLevel(-1) # Set print level: -1 (quiet), 0 (minimal), 1 (normal), 2 (verbose)
+
     minimizer.minimize("Minuit2", "migrad")
-    # minimizer.hesse()
-    minimizer.minos()
+    minimizer.setStrategy(2)  # Set strategy: 0 (speed), 1 (balance), 2 (robust)
+
+    if minos:
+        minimizer.minos()
+    else:
+        minimizer.hesse()
 
     fit_result = minimizer.save()
+    t2 = time.time()
+    print(f"Fitted in {t2 - t1:.2f} seconds")
+    print(f"Fit status: {fit_result.status()}, covQual: {fit_result.covQual()}")
+    # if minos:
+    #     print(f"Minos status: {minimizer.MinosStatus()}")
+    print(f"NLL: {fit_result.minNll()}")
 
     if penalty:
-        print(nll_base.getVal(), penalty.getVal(), nll.getVal())
+        print(f"Penalty: {penalty.getVal()}")
 
     return fit_result
 
-def fit_and_plot(model, data, x, fit_result=None, penalty=None):
+def fit_and_plot(model, data, x, fit_result=None, penalty=None, **kwargs):
 
     if fit_result is None:
         fit_result = fit(model, data, penalty=penalty)
@@ -518,8 +641,7 @@ def fit_and_plot(model, data, x, fit_result=None, penalty=None):
         [model],
         [model.name],
         [fit_result, None, None],
-        logx=True,
-        nbins=128,
+        **kwargs
     )
     plot_correlation_matrix(fit_result)
     if hasattr(model, 'print'):
@@ -595,6 +717,7 @@ def plot_fits(
 
         pull_frame.addPlotable(pull_hist, "P")
 
+
         # Legend
         legend.AddEntry(model_label, model_label, "l")
 
@@ -623,6 +746,11 @@ def plot_fits(
     pull_pad.cd()
     pull_frame.Draw()
 
+    # Add dashed line at y=0
+    zero_line = ROOT.TLine(x.getMin(), 0, x.getMax(), 0)
+    zero_line.SetLineStyle(2)  # Dotted line
+    zero_line.SetLineColor(ROOT.kBlack)
+    zero_line.Draw("same")
 
     # pull_frame.Draw()
 
