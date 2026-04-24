@@ -1,7 +1,10 @@
 import os
 import time
 
+from typing import List, Dict
+
 import json
+import textwrap
 
 import ROOT
 from array import array
@@ -19,14 +22,21 @@ import random
 random_string = lambda: ''.join(random.choices('abcdefghijklmnopqrstuvwxyz', k=10))
 
 from tools import root_tools
-from tools import condor
-from tools import cache
+from tools import scale_out as so
+from tools import storage
+from tools import combine
+emm_cache = storage.ensure_cache("emm")
+plot_cache = storage.ensure_cache("plots")
+profile_cache = storage.ensure_cache("profiles")
+workspace_cache = storage.ensure_cache("workspaces")
 
-emm_cache = cache.ensure_cache("emm")
-
-data_dir = f"{cache.top_dir}/data/high_mass_diphoton/"
+# top_dir = "/project01/ndcms/atownse2/ExponentialMixtureModel"
+top_dir = storage.top_dir
+cache_dir = f"{top_dir}/cache"
+data_dir = f"{top_dir}/data/high_mass_diphoton"
 
 def get_data(normalize=False, sort_and_index=False, tree=False):
+
     triggers = {
         "2016": "HLT_DoublePhoton60",
         "2017": "HLT_DoublePhoton70",
@@ -61,6 +71,7 @@ def get_data(normalize=False, sort_and_index=False, tree=False):
         t_mgg = root_tools.to_root_tree([mgg], "mgg", ["x"], index=True)
     else:
         t_mgg = root_tools.to_root_tree([mgg], "mgg", ["x"], index=True)
+
     return t_mgg
 
 def get_fine_binning():
@@ -111,7 +122,6 @@ def get_coarse_binning():
 
     print(h.Integral())
 
-# Background Models:
 def stick_breaking_weights(n_components: int, **custom_ranges):
     """
     Generate stick-breaking weights for a mixture model.
@@ -154,8 +164,7 @@ def normalization_weights(n_components, **custom_ranges):
         w = ROOT.RooRealVar(
                 f"raw_weight_{i}",
                 f"Unnormalized weight for component {i}",
-                custom_ranges.get(f"raw_weight_{i}", 0),
-                # 0.5, 0, 1
+                custom_ranges.get(f"raw_weight_{i}", 0+i),
             )
         if i == 0:
             w.setConstant(True)
@@ -251,17 +260,40 @@ def ordered_weights(n_components: int, **custom_ranges):
 
     # return weights, unordered_unnormalized_weights, ordered_weights
 
+def zero_one_weights(n_components: int):
+    weights = [
+        ROOT.RooRealVar(
+            f"weight_{i}",
+            f"Weight for component {i}",
+            1/2,
+            0,
+            1
+        ) for i in range(n_components-1)
+    ]
+    # Fix the last weight to be 1 - sum of others
+    # weights[-1].setConstant(True)
+    return weights, []
+
 def mixture_pdf(weights, pdfs, name="pdf"):
     assert len(weights) == len(pdfs), "Weights and PDFs must have the same length"
-    n = len(weights)
+    # n = len(weights)
 
-    pdf_terms = [f"{w.GetName()}*{p.GetName()}" for w, p in zip(weights, pdfs)]
-    pdf_str = "+".join(pdf_terms)
-    pdf = ROOT.RooGenericPdf(
+    # pdf_terms = [f"{w.GetName()}*{p.GetName()}" for w, p in zip(weights, pdfs)]
+    # pdf_str = "+".join(pdf_terms)
+    # pdf = ROOT.RooGenericPdf(
+    #     name,
+    #     "Mixture PDF",
+    #     pdf_str,
+    #     ROOT.RooArgList(*(weights + pdfs))
+    # )
+    # print(f"Npdf: {len(pdfs)}, Nweights: {len(weights)}")
+
+    pdf = ROOT.RooAddPdf(
         name,
         "Mixture PDF",
-        pdf_str,
-        ROOT.RooArgList(*(weights + pdfs))
+        ROOT.RooArgList(*pdfs),
+        ROOT.RooArgList(*weights[:-1]),
+        True
     )
     return pdf
 
@@ -280,8 +312,19 @@ def print_par(par):
     
     print(print_str)
 
+def evaluate_pdf(x, model, x_vals):
+    values = np.zeros_like(x_vals)
+    x.setVal(x_vals[0])
+    first=model.pdf.getVal(ROOT.RooArgSet(x))
+    for i, xv in enumerate(x_vals):
+        x.setVal(xv)
+        values[i] = model.pdf.getVal() # Without normalization
+    norm = values[0] / first
+    return values / norm
+
 class RooFitModel:
     name = "GenericRooFitModel"
+
     def params(self):
         """
         Return the parameters of the model.
@@ -309,9 +352,33 @@ class RooFitModel:
         """
         Set multiple parameters from a dictionary.
         """
+        if name_value_dict is None:
+            return
         for name, value in name_value_dict.items():
             self.set_param(name, value, constant=constant)
     
+    def randomize_params(self, rng=None, custom_ranges: dict = {}):
+        """
+        Randomize the parameters of the model within their ranges.
+        """
+
+        if rng is None:
+            rng = np.random.default_rng()
+
+        for par in self.params():
+            if not par.isConstant():
+                if par.GetName() in custom_ranges:
+                    min_val, max_val = custom_ranges[par.GetName()]
+                else:
+                    min_val = par.getMin()
+                    max_val = par.getMax()
+                    if min_val < -1e6:
+                        min_val = -1e6
+                    if max_val > 1e6:
+                        max_val = 1e6
+                random_val = rng.uniform(min_val, max_val)
+                par.setVal(random_val)
+
     def print(self):
         """
         Print the model parameters.
@@ -320,16 +387,173 @@ class RooFitModel:
         for par in self.params():
             print_par(par)
 
+class f1(RooFitModel):
+    name="f_1"
+    formula = "$N x^{p_1 + p_2 \log(x)}$"
+    def __init__(self, x, **kwargs):
+        
+        p1_name = "p1"
+        p2_name = "p2"
+        pdf_name = kwargs.get("pdf_name", self.name)
+        if "prefix" in kwargs:
+            p1_name = f"{kwargs['prefix']}_{p1_name}"
+            p2_name = f"{kwargs['prefix']}_{p2_name}"
+            pdf_name = f"{kwargs['prefix']}_{pdf_name}"
+
+        # self.p0 = ROOT.RooRealVar("p0", "p0", 0.13, 0.05, 0.3)  
+        self.p1 = ROOT.RooRealVar(p1_name, p1_name, 5.7, 1, 11)
+        self.p2 = ROOT.RooRealVar(p2_name, p2_name, -0.78, -1.0, -0.5)
+        self.pdf = ROOT.RooGenericPdf(
+            pdf_name,
+            f"pow(x,{p1_name}+{p2_name}*TMath::Log(x))",  # Formula for the PDF
+            ROOT.RooArgList(self.p1, self.p2, x),  # Arguments for the formula
+        )
+    
+    def params(self):
+        return [self.p1, self.p2]
+
+class Dijet(RooFitModel):
+    name="Dijet"
+
+    def __init__(self, x, **kwargs):
+        p1_name = "p1"
+        p2_name = "p2"
+        p3_name = "p3"
+        pdf_name = kwargs.get("pdf_name", self.name)
+        if "prefix" in kwargs:
+            p1_name = f"{kwargs['prefix']}_{p1_name}"
+            p2_name = f"{kwargs['prefix']}_{p2_name}"
+            p3_name = f"{kwargs['prefix']}_{p3_name}"
+            pdf_name = f"{kwargs['prefix']}_{pdf_name}"
+
+        p1 = ROOT.RooRealVar(p1_name, p1_name, -20, -100, 100)
+        p2 = ROOT.RooRealVar(p2_name, p2_name, -50, -100, 100)
+        p3 = ROOT.RooRealVar(p3_name, p3_name, -10, -100, 100)
+        fn = lambda x, p1, p2, p3: f"pow(1 - {x}, {p1}) * pow({x}, {p2} + {p3} * TMath::Log({x}))"
+        pdf = ROOT.RooGenericPdf(
+            pdf_name,
+            fn(f"{x.GetName()}/13000", p1.GetName(), p2.GetName(), p3.GetName()),  # Formula for the PDF
+            ROOT.RooArgList(x, p1, p2, p3)  # Arguments for the formula
+        )
+        self.p1 = p1
+        self.p2 = p2
+        self.p3 = p3
+        # self.p4 = p4
+        self.pdf = pdf
+
+    def params(self):
+        return [self.p1, self.p2, self.p3]
+
+class f2(RooFitModel):
+    name= "f_2"
+    formula = "$N\exp(p_1*x)*x^{-p_2^2}$"
+    def __init__(self, x, **kwargs):
+        p1_name = "p1"
+        p2_name = "p2"
+        pdf_name = kwargs.get("pdf_name", self.name)
+        if "prefix" in kwargs:
+            p1_name = f"{kwargs['prefix']}_{p1_name}"
+            p2_name = f"{kwargs['prefix']}_{p2_name}"
+            pdf_name = f"{kwargs['prefix']}_{pdf_name}"
+
+        self.p1 = ROOT.RooRealVar(p1_name, p1_name, -0.0016, -0.1, 0)
+        self.p2 = ROOT.RooRealVar(p2_name, p2_name, 1.8, 1, 3)
+
+        self.pdf = ROOT.RooGenericPdf(
+            pdf_name,
+            f"7e+10*exp({p1_name}*x)*pow(x,-1*{p2_name}*{p2_name})",  # Formula for the PDF
+            ROOT.RooArgList(self.p1, self.p2, x)  # Arguments for the formula
+        )
+    
+    def params(self):
+        return [self.p1, self.p2]
+
+class ExpPow3(RooFitModel):
+    name= "ExpPow3"
+    def __init__(self, x, **kwargs):
+        p1_name = "p1"
+        p2_name = "p2"
+        pdf_name = kwargs.get("pdf_name", self.name)
+        if "prefix" in kwargs:
+            p1_name = f"{kwargs['prefix']}_{p1_name}"
+            p2_name = f"{kwargs['prefix']}_{p2_name}"
+            pdf_name = f"{kwargs['prefix']}_{pdf_name}"
+
+        self.p1 = ROOT.RooRealVar(p1_name, p1_name, -0.0016, -0.1, 0)
+        self.p2 = ROOT.RooRealVar(p2_name, p2_name, 1.8, 1, 3)
+
+        self.pdf = ROOT.RooGenericPdf(
+            pdf_name,
+            f"7e+10*exp({p1_name}*x)*pow(x,-1*{p2_name}*{p2_name})",  # Formula for the PDF
+            ROOT.RooArgList(self.p1, self.p2, x)  # Arguments for the formula
+        )
+    
+    def params(self):
+        return [self.p1, self.p2]
+
+class f3(RooFitModel):
+    name= "f_3"
+    formula = "$N(1 + p_1 x)^{-p_2^2}$"
+    def __init__(self, x, **kwargs):
+
+        p1_name = "p1"
+        p2_name = "p2"
+        pdf_name = kwargs.get("pdf_name", self.name)
+        if "prefix" in kwargs:
+            p1_name = f"{kwargs['prefix']}_{p1_name}"
+            p2_name = f"{kwargs['prefix']}_{p2_name}"
+            pdf_name = f"{kwargs['prefix']}_{pdf_name}"
+
+        self.p1 = ROOT.RooRealVar(p1_name, p1_name, 0.00228, 0, 0.05)
+        self.p2 = ROOT.RooRealVar(p2_name, p2_name, 2.7013689, 2, 4)
+
+        self.pdf = ROOT.RooGenericPdf(
+            pdf_name,
+            f"8760*pow(1+{p1_name}*x, -1*{p2_name}*{p2_name})",  # Formula for the PDF
+            ROOT.RooArgList(self.p1, self.p2, x)  # Arguments for the formula
+        )
+    
+    def params(self):
+        return [self.p1, self.p2]
+
+class f4(RooFitModel):
+    name = "f_4"
+    formula = "$N(1 + p_1 x)^{-p_2 - p_3 x}$"
+    def __init__(self, x, **kwargs):
+
+        p1_name = "p1"
+        p2_name = "p2"
+        p3_name = "p3"
+        pdf_name = kwargs.get("pdf_name", self.name)
+        if "prefix" in kwargs:
+            p1_name = f"{kwargs['prefix']}_{p1_name}"
+            p2_name = f"{kwargs['prefix']}_{p2_name}"
+            p3_name = f"{kwargs['prefix']}_{p3_name}"
+            pdf_name = f"{kwargs['prefix']}_{pdf_name}"
+
+        self.p1 = ROOT.RooRealVar(p1_name, p1_name, 0.029456453, 0, 0.1)
+        self.p2 = ROOT.RooRealVar(p2_name, p2_name, 3.8645171, 1, 9)
+        self.p3 = ROOT.RooRealVar(p3_name, p3_name, 0.00027, 0, 0.01)
+
+        self.pdf = ROOT.RooGenericPdf(
+            pdf_name,
+            f"2124447*pow(1+{p1_name}*x, -{p2_name} - {p3_name}*x)",  # Formula for the PDF
+            ROOT.RooArgList(self.p1, self.p2, self.p3, x)  # Arguments for the formula
+        )
+    
+    def params(self):
+        return [self.p1, self.p2, self.p3]
+
 class MixtureModel(RooFitModel):
 
     def __init__(self, x, n_components: int, **kwargs):
         self.n_components = n_components
-        self.name = f"MixtureModel_{n_components}"
+        self.name = f"Mixture-{n_components}"
         self.kwargs = kwargs
-        
+
         self.init_weights()
         self.init_pdfs(x)
-        self.pdf = mixture_pdf(self.weights, self.pdfs, name=kwargs.get("name", self.name))
+        self.pdf = mixture_pdf(self.weights, self.pdfs, name=kwargs.get("pdf_name", self.name))
     
     def init_weights(self, **custom_ranges):
         if self.kwargs.get("stick_breaking", False):
@@ -338,6 +562,7 @@ class MixtureModel(RooFitModel):
             self.weights, self.raw_weights, self.ordered_weights = ordered_weights(self.n_components, **custom_ranges)
         else:
             self.weights, self.raw_weights = normalization_weights(self.n_components)
+            # self.weights, self.raw_weights = zero_one_weights(self.n_components)
     
     def init_pdfs(self, x):
         """
@@ -347,6 +572,22 @@ class MixtureModel(RooFitModel):
         raise NotImplementedError("Subclasses must implement init_pdfs")
 
 class ExponentialMixtureModel(MixtureModel):
+    rate_max = 50
+
+    def randomize_params(self, custom_ranges = {}, rng=np.random.default_rng()):
+        if custom_ranges == {}:
+
+            rate = 0
+            for i, raw_rate in enumerate(self.raw_rates):
+                rate += rng.uniform(0.01, 3)
+                if i == len(self.raw_rates) - 1:
+                    rate += rng.uniform(0, 20)
+                raw_rate.setVal(rate)
+            for raw_weight in self.raw_weights:
+                if not raw_weight.isConstant():
+                    raw_weight.setVal(0)
+        else:
+            super().randomize_params(custom_ranges=custom_ranges)
 
     def integral(self, x, lo, hi):
         integral = 0
@@ -356,23 +597,55 @@ class ExponentialMixtureModel(MixtureModel):
             integral += weight*(np.exp(rate*lo) - np.exp(rate*hi))
         return integral
 
-    def init_rates(self, x):
+    def init_rates(self, x, random=False):
         self.name = f"Exponential{self.name}"
-        assert "data_mean" in self.kwargs, "data_mean must be provided to initialize rates"
-        rate_scaling = -1/(self.kwargs["data_mean"] - x.getMin())
+        # assert "data_mean" in self.kwargs, "data_mean must be provided to initialize rates"
+        # data_mean = self.kwargs["data_mean"]
+        if "data_mean" in self.kwargs:
+            data_mean = self.kwargs["data_mean"]
+        else:
+            raise ValueError("data_mean must be provided to initialize rates")
+        rate_scaling = -1/(data_mean - x.getMin())
+        # data_mean = 200
+        # rate_scaling = -1/data_mean
+        if "random" in self.kwargs:
+            random_initialization = self.kwargs["random"]
 
         # Initialize raw rates
         if "initial_raw_rates" in self.kwargs:
             initial_raw_rates = self.kwargs["initial_raw_rates"]
             assert len(initial_raw_rates) == self.n_components, "initial_raw_rates must have the same length as n_components"
+        elif self.kwargs.get("random_rates", False):
+            initial_raw_rates = [random.uniform(0, 1e-3 if _ == 0 else 10.0) for _ in range(self.n_components)]
+            print(f"Using random initial raw rates: {initial_raw_rates}")
         else:
-            initial_raw_rates = [(i+1) for i in range(self.n_components)]
+            # initial_raw_rates = [(i+1) for i in range(self.n_components)]
+            if random_initialization:
+                initial_raw_rates = [np.random.uniform(0, 5.0) for _ in range(self.n_components)]
+            else:
+                initial_raw_rates = [(0.1+i) for i in range(self.n_components)]
+
         
+        raw_rate_specs = []
+        for i in range(self.n_components):
+            if f"raw_rate_{i}" in self.kwargs:
+                spec = self.kwargs[f"raw_rate_{i}"]
+                print(f"Using custom spec for raw_rate_{i}: {spec}")
+                if isinstance(spec, (list, tuple)):
+                    assert len(spec) == 3, "raw_rate_{i} must be a tuple of (initial, min, max)"
+                    raw_rate_specs.append(spec)
+                elif isinstance(spec, (int, float)):
+                    raw_rate_specs.append((spec, 0, self.rate_max))
+                else:
+                    raise ValueError("raw_rate_{i} must be a float or a tuple of (initial, min, max)")
+            else:
+                raw_rate_specs.append((0.1+i, 0, self.rate_max))
+
         self.raw_rates = [
             ROOT.RooRealVar(
                 f"raw_rate_{i}",
                 f"Raw rate for exponential {i}",
-                initial_raw_rates[i], 0, 100
+                *raw_rate_specs[i]
             ) for i in range(self.n_components)
         ]
 
@@ -391,8 +664,10 @@ class ExponentialMixtureModel(MixtureModel):
         if "max_tail_prob" in self.kwargs:    
             self.weights[0].setRange(0, self.kwargs["max_tail_prob"])
 
+        # print("Using MY Exponential PDFs for the mixture model.")
         self.pdfs = [
             ROOT.RooExponential(
+            # ROOT.MyExponential(
                 f"pdf_{i}",
                 f"Exponential PDF {i}",
                 x, self.rates[i]
@@ -405,16 +680,100 @@ class ExponentialMixtureModel(MixtureModel):
         """
         return self.raw_rates + self.raw_weights
 
+class ExponentialMixtureModel_1(ExponentialMixtureModel):
+    name = "ExponentialMixture-1"
+    def __init__(self, x, **kwargs):
+        super().__init__(x, 1, data_mean=700, **kwargs)
+
+class ExponentialMixtureModel_2(ExponentialMixtureModel):
+    name = "ExponentialMixture-2"
+    def __init__(self, x, **kwargs):
+        super().__init__(x, 2, data_mean=700, **kwargs)
+
+class ExponentialMixtureModel_3(ExponentialMixtureModel):
+    name = "ExponentialMixture-3"
+    def __init__(self, x, **kwargs):
+        super().__init__(x, 3, data_mean=700, **kwargs)
+
+class ExponentialMixtureModel_4(ExponentialMixtureModel):
+    name = "ExponentialMixture-4"
+    def __init__(self, x, **kwargs):
+        super().__init__(x, 4, data_mean=700, **kwargs)
+
+class ExponentialMixtureModel_5(ExponentialMixtureModel):
+    name = "ExponentialMixture-5"
+    def __init__(self, x, **kwargs):
+        super().__init__(x, 5, data_mean=700, **kwargs)
+
+class ExponentialMixtureModel_6(ExponentialMixtureModel):
+    name = "ExponentialMixture-6"
+    def __init__(self, x, **kwargs):
+        super().__init__(x, 6, data_mean=700, **kwargs)
+
+class ExponentialMixtureModel_2_Dijet(ExponentialMixtureModel):
+    name = "ExponentialMixture-2"
+    def __init__(self, x, **kwargs):
+        super().__init__(x, 2, data_mean=1350, **kwargs)
+
+class ExponentialMixtureModel_3_Dijet(ExponentialMixtureModel):
+    name = "ExponentialMixture-3"
+    def __init__(self, x, **kwargs):
+        super().__init__(x, 3, data_mean=1350, **kwargs)
+
+class ExponentialMixtureModel_4_Dijet(ExponentialMixtureModel):
+    name = "ExponentialMixture-4"
+    def __init__(self, x, **kwargs):
+        super().__init__(x, 4, data_mean=1350, **kwargs)
+
+class ExponentialMixtureModel_5_Dijet(ExponentialMixtureModel):
+    name = "ExponentialMixture-5"
+    def __init__(self, x, **kwargs):
+        super().__init__(x, 5, data_mean=1350, **kwargs)
+
+class ExponentialMixtureModel_6_Dijet(ExponentialMixtureModel):
+    name = "ExponentialMixture-6"
+    def __init__(self, x, **kwargs):
+        super().__init__(x, 6, data_mean=1350, **kwargs)
+
 class ExponentialMixtureModel_Ordered(ExponentialMixtureModel):
-    def init_rates(self, x):
+    rate_min = 0.1
+    rate_diff_min = 0.05
+    def randomize_params(self, custom_ranges={}, rng=np.random.default_rng()):
+        if custom_ranges == {}:
+            for i, raw_rate_diff in enumerate(self.raw_rate_diffs):
+                if i == 0:
+                    rate_diff = rng.uniform(self.rate_min, 1)
+                if i == len(self.raw_rate_diffs)-1:
+                    rate_diff = rng.uniform(self.rate_diff_min, 100)
+                else:
+                    rate_diff = rng.uniform(self.rate_diff_min, 1)
+                
+                raw_rate_diff.setVal(rate_diff)
+            for raw_weight in self.raw_weights:
+                if not raw_weight.isConstant():
+                    raw_weight.setVal(0)
+        else:
+            return super().randomize_params(custom_ranges, rng)
+
+    def init_rates(self, x, random=False):
+        self.name = f"ExponentialMixture-Ordered-{self.n_components}"
         assert "data_mean" in self.kwargs, "data_mean must be provided to initialize rates"
         rate_scaling = -1/(self.kwargs["data_mean"] - x.getMin())
+
+        if "random" in self.kwargs:
+            random = self.kwargs["random"]
+
+        mult = 1.0
+        if random:
+            mult = np.random.uniform(0.5, 2.0)
 
         self.raw_rate_diffs = [
             ROOT.RooRealVar(
                 f"raw_rate_diff_{i}",
                 f"Inverse rate difference {i}",
-                0.5, 0, 100
+                0.5*mult,
+                self.rate_min if i==0 else self.rate_diff_min,
+                100
             ) for i in range(self.n_components)
         ]
 
@@ -422,7 +781,7 @@ class ExponentialMixtureModel_Ordered(ExponentialMixtureModel):
             ROOT.RooFormulaVar(
                 f"rate_{i}",
                 f"Ordered Rate for exponential {i}",
-                f"{rate_scaling}/({'+'.join([rd.GetName() for rd in self.raw_rate_diffs[:i+1]])})",
+                f"{rate_scaling}*({'+'.join([rd.GetName() for rd in self.raw_rate_diffs[:i+1]])})",
                 ROOT.RooArgList(*self.raw_rate_diffs[:i+1])
             ) for i in range(self.n_components)
         ]
@@ -433,6 +792,26 @@ class ExponentialMixtureModel_Ordered(ExponentialMixtureModel):
         """
         return self.raw_rate_diffs + self.raw_weights
 
+class ExponentialMixtureModel_Ordered_2(ExponentialMixtureModel_Ordered):
+    name = "ExponentialMixture-Ordered-2"
+    def __init__(self, x, **kwargs):
+        super().__init__(x, 2, data_mean=700, **kwargs)
+
+class ExponentialMixtureModel_Ordered_3(ExponentialMixtureModel_Ordered):
+    name = "ExponentialMixture-Ordered-3"
+    def __init__(self, x, **kwargs):
+        super().__init__(x, 3, data_mean=700, **kwargs)
+
+class ExponentialMixtureModel_Ordered_4(ExponentialMixtureModel_Ordered):
+    name = "ExponentialMixture-Ordered-4"
+    def __init__(self, x, **kwargs):
+        super().__init__(x, 4, data_mean=700, **kwargs)
+
+class ExponentialMixtureModel_Ordered_5(ExponentialMixtureModel_Ordered):
+    name = "ExponentialMixture-Ordered-5"
+    def __init__(self, x, **kwargs):
+        super().__init__(x, 5, data_mean=700, **kwargs)
+
 class ExponentialMixtureModel_Ordered_SmallTail(ExponentialMixtureModel_Ordered):
     def init_weights(self):
         assert self.n_components >= 2, "n_components must be at least 2 for SmallTail model"
@@ -441,14 +820,13 @@ class ExponentialMixtureModel_Ordered_SmallTail(ExponentialMixtureModel_Ordered)
             }
         super().init_weights(**custom_ranges)
     
-
 class LomaxMixtureModel(MixtureModel):
     name = "LomaxMixtureModel"
     def init_alphas(self, x):
         self.alphas = [
             ROOT.RooRealVar(
                 f"alpha_{i}", f"Shape parameter {i}",
-                *self.kwargs.get(f"alpha_{i}", (2+i, 0.01, 10000))
+                *self.kwargs.get(f"alpha_{i}", (2+i, 0.01, 10))
             ) for i in range(self.n_components)
         ]
     
@@ -456,7 +834,7 @@ class LomaxMixtureModel(MixtureModel):
         self.betas = [
             ROOT.RooRealVar(
                 f"beta_{i}", f"Scale parameter {i}",
-                *self.kwargs.get(f"beta_{i}", (0.005, 0.000001, 10))
+                *self.kwargs.get(f"beta_{i}", (0.005, 0.000001, 1))
             ) for i in range(self.n_components)
         ]
 
@@ -479,23 +857,31 @@ class LomaxMixtureModel(MixtureModel):
     def params(self):
         return self.alphas + self.betas + self.raw_weights
 
+class LomaxMixtureModel_1(LomaxMixtureModel):
+    name = "LomaxMixture-1"
+    def __init__(self, x, **kwargs):
+        super().__init__(x, 1, **kwargs)
+
 class GaussianSignalModel(RooFitModel):
-    name = "GaussianSignalModel"
-    def __init__(self, x, mean, **kwargs):
+    name = "Gaussian"
+    def __init__(self, x, mean, width, **kwargs):
+        self.prefix = kwargs.get("prefix", "")
         self.mean = ROOT.RooRealVar(
-            "signal_mean",
+            f"{self.prefix}sig_mean",
             "Signal mean",
             mean,
+            0.9*mean,
+            1.1*mean
         )
         self.sigma = ROOT.RooRealVar(
-            "signal_sigma",
+            f"{self.prefix}sig_sigma",
             "Signal sigma",
-            kwargs.get("initial_sigma", 10.0),
-            kwargs.get("min_sigma", 0.1),
-            kwargs.get("max_sigma", 50.0)
+            width,
+            0.8*width,
+            1.2*width
         )
         self.pdf = ROOT.RooGaussian(
-            "signal_pdf",
+            f"{self.prefix}sig_pdf",
             "Gaussian Signal PDF",
             x,
             self.mean,
@@ -511,25 +897,26 @@ class SignalPlusBackgroundModel(RooFitModel):
         self.signal_model = signal_model
         self.background_model = background_model
 
-        self.signal_strength = ROOT.RooRealVar(
-            "signal_strength",
-            "Signal Strength",
-            *kwargs.get("signal_strength", (1, 0, 10))
-        )
+        max_sig = kwargs.get("max_sig", 100)
+        n_bkg = kwargs.get("n_bkg", 5036)
 
-        self.signal_fraction = ROOT.RooFormulaVar(
-            "signal_fraction",
-            "Signal Fraction",
-            f"signal_strength * (1/1000)",
-            ROOT.RooArgList(self.signal_strength)
+        self.n_sig = ROOT.RooRealVar(
+            "n_sig",
+            "Number of signal events",
+            0, -max_sig, max_sig
         )
-
+        self.n_bkg = ROOT.RooRealVar(
+            "n_bkg",
+            "Number of background events",
+            n_bkg, 0.5*n_bkg, 2*n_bkg
+        )
         self.pdf = ROOT.RooAddPdf(
             "signal_plus_background_pdf",
             "Signal plus Background PDF",
             ROOT.RooArgList(self.signal_model.pdf, self.background_model.pdf),
-            ROOT.RooArgList(self.signal_fraction)
+            ROOT.RooArgList(self.n_sig, self.n_bkg)
         )
+
     
     def params(self):
         return [self.signal_strength] + self.signal_model.params() + self.background_model.params()
@@ -619,137 +1006,104 @@ def ordered_penalty(rate_diffs, weights, penalty_strength=0.1):
     )
     return penalty
 
-class Dijet:
-    name="Dijet"
-    def __init__(self, x):
+def create_combine_workspace(workspace_dir, n_components, mean, sigma, expectation=1):
+    if not os.path.exists(workspace_dir):
+        os.makedirs(workspace_dir, exist_ok=True)
+    
+    create_background_workspace(n_components, workspace_dir=workspace_dir)
+    create_signal_workspace(mean, sigma, expectation=expectation, workspace_dir=workspace_dir)
+    create_datacard(workspace_dir)
+    print(f"Finished creating workspace in {workspace_dir}/.")
+
+fit_options = [
+    # ROOT.RooFit.IntegrateBins(0.0001),
+    # ROOT.RooFit.PrintLevel(-1),
+    # ROOT.RooFit.Offset(True),
+    # # ROOT.RooFit.Strategy(2),
+    # ROOT.RooFit.Save(),
+    # # ROOT.RooFit.Range("fit_range")
+]
+
+def fit_n_times(model, data, n_attempts=5, fit_options=fit_options, verbose=True):
+    # Usual issue is EDM above max which I assum is because of flat likelihood surface
+    # Keep the fit going at last estimates seems to help
+    import ROOT
+    if ROOT.RooFit.Save(True) not in fit_options:
+        fit_options.append(ROOT.RooFit.Save(True))
+    for attempt in range(n_attempts):
+        fit_result = model.pdf.fitTo(
+            data,
+            *fit_options
+        )
+        if fit_result.status() <= 2:
+            if attempt > 0 and verbose:
+                print(f"Fit succeeded after {attempt} retries")
+            return fit_result
+    if verbose:
+        print(f"Fit failed after {n_attempts} attempts, returning None" )
+    return None
+    # return fit_result
+
+fit_cache = storage.ensure_cache("fits")
+def random_restarts_filename(
+        model_name,
+        data_name,
+        n_samples,
+        seed,
+        ):
+    tags = f"{model_name}_{data_name}_nrestarts{n_samples}_seed{seed}.pkl"
+    f = f"{fit_cache}/{tags}"
+    return f
+
+import pickle
+def fit_random_restarts(
+        x, data,
+        model_primitive,
+        seed, n_samples,
+        n_retries=5,
+        save=True,
+        fit_options=fit_options,
+        verbose=True,
+    ):
+
+    best_nll = np.inf
+    fit_results = []
+
+    rng = np.random.default_rng(seed=seed)
+    for i in range(n_samples):
+        model = model_primitive(x)
+        model.randomize_params(rng=rng)
+        initial_pars = {p.GetName(): p.getVal() for p in model.params()}
+
+        fit_result = fit_n_times(model, data, n_attempts=n_retries, fit_options=fit_options, verbose=False)
+        if fit_result is None:
+            if verbose:
+                print(f"Random Restart {i+1}/{n_samples}: Fit failed after {n_retries} attempts.")
+            continue
+
+        if fit_result.status() <= 2 and fit_result.minNll() < best_nll:
+            best_nll = fit_result.minNll()
+            fit_result = {
+                "nll": best_nll,
+                "initial_pars": initial_pars,
+                "final_pars": {p.GetName(): p.getVal() for p in model.params()}
+                }
+            fit_results.append(fit_result)
         
-        # self.p0 = ROOT.RooRealVar("p0", "p0", 0.13, 0.05, 0.3)  
-        self.p1 = ROOT.RooRealVar("p1", "p1", 5.7, 5.5, 5.9)
-        self.p2 = ROOT.RooRealVar("p2", "p2", -0.78, -1.0, -0.5)
+        del model  # Free memory
 
-        self.pdf = ROOT.RooGenericPdf(
-            "dijet_pdf", 
-            "pow(x,p1+p2*TMath::Log(x))",  # Formula for the PDF
-            ROOT.RooArgList(self.p1, self.p2, x),  # Arguments for the formula
-        )
-
-class ExpPow:
-    name= "ExpPow"
-    def __init__(self, x):
-        self.p1 = ROOT.RooRealVar("p1", "p1", -0.0016, -0.003, -0.001)
-        self.p2 = ROOT.RooRealVar("p2", "p2", 1.8, 1.5, 2.0)
-
-        self.pdf = ROOT.RooGenericPdf(
-            "exppow_pdf",
-            "exp(p1*x)*pow(x,-1*p2*p2)",  # Formula for the PDF
-            ROOT.RooArgList(self.p1, self.p2, x)  # Arguments for the formula
-        )
-
-
-
-def AIC_BIC_loo(n_components, t, k_folds=-1):
-
-    x = ROOT.RooRealVar("x", "Diphoton Mass [GeV]", 500, 4000)
-    index=ROOT.RooRealVar("index", "index", 0, 0, 1e6)
-
-    data = ROOT.RooDataSet("mgg", "mgg", ROOT.RooArgSet(x, index), ROOT.RooFit.Import(t))
+    if len(fit_results) == 0:
+        print("No successful fits were found.")
+        return None
     
-    model_inst = ExponentialMixtureModel(x, n_components)
-    model = model_inst.pdf
+    if save:
+        model = model_primitive(x)
+        fout = random_restarts_filename(model.name, data.GetName(), n_samples, seed)
+        with open(fout, "wb") as f:
+            pickle.dump(fit_results, f)
 
-    AICs = []
-    BICs = []
+    return fit_results
 
-    if k_folds == -1:
-        k_folds = data.numEntries()
-
-    step_size = data.numEntries() // k_folds
-
-    for i in range(k_folds):
-        # print(f"Fitting dataset {i+1}/{k_folds}")
-
-        data_loo = data.reduce(f"index<({i*step_size}) || index>=({(i+1)*step_size})")
-
-        # Fit
-        fit_result = model.fitTo(data_loo)#, ROOT.RooFit.PrintLevel(-1))
-
-        nll = model.createNLL(data_loo).getVal()
-        n_pars = model.getParameters(data_loo).getSize()
-
-        AICs.append(md.AIC(nll, n_pars))
-        BICs.append(md.BIC(nll, n_pars, data_loo.numEntries()))
-
-    return {"AIC": AICs, "BIC": BICs}
-
-def get_AIC_BIC_loo(k_max=4, t=None, remake=False, tag="data"):
-
-    aic_bic_file = os.path.join(emm_cache, f"aic_bic_results_{tag}.csv")
-    if os.path.exists(aic_bic_file) and not remake:
-        df = pd.read_csv(aic_bic_file)
-    else:
-        if t is None:
-            t = get_data()
-
-        n_components = [i for i in range(1, k_max + 1)]
-        results = []
-        with mp.Pool(len(n_components)) as pool:
-            results = pool.starmap(
-                AIC_BIC_loo, 
-                [(i, t) for i in n_components]
-            )
-
-        # Collect results
-        df = []
-        for i, result in enumerate(results):
-            AIC_low, AIC_med, AIC_high = np.percentile(result["AIC"], [16, 50, 84])
-            BIC_low, BIC_med, BIC_high = np.percentile(result["BIC"], [16, 50, 84])
-            df.append({
-                "n_components": n_components[i],
-                "AIC_low": AIC_low,
-                "AIC_med": AIC_med,
-                "AIC_high": AIC_high,
-                "BIC_low": BIC_low,
-                "BIC_med": BIC_med,
-                "BIC_high": BIC_high
-            })
-        # Convert to DataFrame
-        df = pd.DataFrame(df)
-
-        df.to_csv(aic_bic_file, index=False)
-    
-    return df
-
-def plot_AIC_BIC_loo(df=None):
-    if df is None:
-        df = get_AIC_BIC_loo(remake=False)
-    
-    fig, ax = plt.subplots(1,2, figsize=(12, 5))
-
-    ax[0].errorbar(
-        df['n_components'],
-        df['AIC_med'],
-        yerr=[df['AIC_med']-df['AIC_low'], df['AIC_high']-df['AIC_med']],
-        capsize=5,
-        markersize=10
-    )
-    ax[0].set_xlabel("k")
-    ax[0].set_ylabel("AIC")
-    ax[0].set_xticks(df['n_components'])
-
-    ax[1].errorbar(
-        df['n_components'],
-        df['BIC_med'],
-        yerr=[df['BIC_med']-df['BIC_low'], df['BIC_high']-df['BIC_med']],
-        capsize=5,
-        markersize=10
-    )
-    ax[1].set_xlabel("k")
-    ax[1].set_ylabel("BIC")
-    ax[1].set_xticks(df['n_components'])
-
-    # fig.suptitle("Leave-One-Out Cross Validation")
-    plt.tight_layout()
-    plt.show()
 
 def fit_random_subset(tree):
 
@@ -797,8 +1151,22 @@ def fit_random_subsets(t_mgg, n_subsets=1000):
 
     # rates = [rate for rate in rates if rate is not None]  # Filter out failed fits
 
+def fit(model, data, fit_args=[]):
+    t1 = time.time()
     
-def fit(model, data, penalty=None, minos=False, hesse=False, quiet=False, return_nll=False, return_fit_result=False):
+    fit_result = model.pdf.fitTo(
+        data,
+        ROOT.RooFit.Save(True),
+        *fit_args
+    )
+    t2 = time.time()
+    print(f"Fitted in {t2 - t1:.2f} seconds")
+    print(f"Fit status: {fit_result.status()}, covQual: {fit_result.covQual()}")
+    print(f"NLL: {fit_result.minNll()}")
+
+    return fit_result
+
+def fit_with_penalty(model, data, penalty=None, minos=False, hesse=False, quiet=False, return_nll=False, return_fit_result=False, fit_args=[]):
     t1 = time.time()
     if penalty is not None:
         nll_base = model.pdf.createNLL(data)
@@ -859,34 +1227,40 @@ def fit(model, data, penalty=None, minos=False, hesse=False, quiet=False, return
 def fit_and_plot(
     model, data, x,
     fit_result=None,
-    minos=False,
-    penalty=None,
     print_pars=True,
+    fit_args=[],
     **kwargs):
 
     if fit_result is None:
-        fit_result = fit(model, data, minos=minos, penalty=penalty, quiet=True, return_fit_result=True)
+        fit_result = fit(model, data, fit_args=fit_args)
 
     plot_fits(
         data, x,
         [model],
         [model.name],
-        [fit_result, None, None],
         **kwargs
     )
-    plot_correlation_matrix(fit_result)
+    # plot_correlation_matrix(fit_result)
     if hasattr(model, 'print') and print_pars:
         model.print()
+
+default_colors = ['#377eb8', '#ff7f00', '#4daf4a',
+            '#f781bf', '#984ea3', '#999999', '#e41a1c', '#dede00']
+default_root_colors = [ROOT.TColor.GetColor(c) for c in default_colors]
 
 def plot_fits(
     data, x, #bins,
     models,
     model_labels,
-    fit_results,
+    title=None,
     logx=False,
-    nbins=128,
+    x_label=None,
+    nbins=None,
+    plot_range=None,
+    binning=None,
     # colors = [ROOT.kP6Blue, ROOT.kP6Yellow, ROOT.kP6Red, ROOT.kP6Grape],
-    colors = [ROOT.kBlue, ROOT.kYellow, ROOT.kRed]
+    colors = default_root_colors,
+    y_min=1.1e-3,
     ):
     # colors = [hex_to_tcolor(c) if isinstance(c, str) else c for c in colors]
 
@@ -894,31 +1268,64 @@ def plot_fits(
     c.cd()
 
     # Set binning
-    binning = ROOT.RooBinning(nbins, x.getMin(), x.getMax())
-    x.setBinning(binning)
+    # x.setRange(plot_range)
+    # Get range from x (RooRealVar)
+    # if plot_range:
+    #     x.setRange(*plot_range)
+    if nbins is not None:
+        x_min = x.getMin()
+        x_max = x.getMax()
+        if plot_range is not None:
+            x_min, x_max = plot_range
+        binning = ROOT.RooBinning(nbins, x_min, x_max)
+        x.setBinning(binning)
 
     # Frames
-    main_frame = x.frame(ROOT.RooFit.Title("Diphoton Mass Fit"))
-    main_frame.GetYaxis().SetTitleSize(0.05)
-    main_frame.GetYaxis().SetTitleOffset(0.6)
+    main_frame = x.frame()
 
-    pull_frame = x.frame(ROOT.RooFit.Title("Pull"))
+    if title is not None:
+        main_frame.SetTitle(title)
+        main_frame.SetTitleSize(0.08)
+    else:
+        main_frame.SetTitle("")
+
+    title_size = 0.1
+    label_size = 0.06
+
+    main_frame.GetYaxis().SetTitleSize(title_size)
+    main_frame.GetYaxis().SetTitleOffset(0.35)
+    main_frame.GetYaxis().SetLabelSize(label_size)
+
+    pull_frame = x.frame()
     pull_frame.SetTitle("")  # Remove title
-    pull_frame.GetYaxis().SetTitleSize(0.12)
-    pull_frame.GetYaxis().SetTitleOffset(0.23)
+    pull_frame.GetYaxis().SetTitleSize(title_size)
+    pull_frame.GetYaxis().SetTitleOffset(0.35)
     pull_frame.GetYaxis().SetTitle("Pull")
-    pull_frame.GetYaxis().SetLabelSize(0.08)
-    pull_frame.GetYaxis().SetNdivisions(1*4 + 100*0 + 10000*0)  # 3 primary, 6 secondary, 0 tertiary
-    pull_frame.GetYaxis().SetRangeUser(-4.5, 4.5)
+    pull_frame.GetYaxis().SetLabelSize(label_size)
+    pull_frame.GetYaxis().SetNdivisions(5, 0, 0, True)
+    pull_frame.GetYaxis().SetRangeUser(-4.9, 4.9)
 
-    pull_frame.GetXaxis().SetTitleSize(0.125)
-    pull_frame.GetXaxis().SetLabelSize(0.08)
-    pull_frame.GetXaxis().SetTitle("m_{#gamma#gamma} [GeV]")
+    # Add dashed line at y=0
+    line = ROOT.TLine(x.getMin(), 0, x.getMax(), 0)
+    line.SetLineStyle(ROOT.kDashed)
+    line.SetLineColor(ROOT.kBlack)
+    pull_frame.addObject(line)
+
+    pull_frame.GetXaxis().SetTitleSize(title_size)
+    pull_frame.GetXaxis().SetLabelSize(label_size)
+    if x_label is not None:
+        pull_frame.GetXaxis().SetTitle(x_label)
+    else:
+        pull_frame.GetXaxis().SetTitle(x.GetTitle())
+    
+    if plot_range is not None:
+        main_frame.GetXaxis().SetRangeUser(*plot_range)
+        pull_frame.GetXaxis().SetRangeUser(*plot_range)
 
     # Create a legend
-    legend = ROOT.TLegend(0.55, 0.65, 0.89, 0.89)
+    legend = ROOT.TLegend(0.55, 0.40, 0.99, 0.89)
     legend.SetTextFont(42)
-    legend.SetTextSize(0.04)
+    legend.SetTextSize(0.06)
     legend.SetBorderSize(0)
     legend.SetFillStyle(0)  # Transparent legend background
 
@@ -926,12 +1333,17 @@ def plot_fits(
     data.plotOn(main_frame)
     legend.AddEntry(data, "Data", "p")
     for i, model in enumerate(models):
-        pdf = model.pdf
-        fit_result = fit_results[i]
+        if isinstance(model, RooFitModel):
+            pdf = model.pdf
+        else:
+            pdf = model
+
         model_label = model_labels[i]
 
         pdf.plotOn(
             main_frame,
+            ROOT.RooFit.Precision(1e-5),
+            ROOT.RooFit.IntegrateBins(1e-4),
             ROOT.RooFit.LineColor(colors[i]),
             ROOT.RooFit.Name(model_label),  # Name for the PDF in the legend
             ROOT.RooFit.DrawOption("L"),  # Use "L" for line only
@@ -949,8 +1361,8 @@ def plot_fits(
         pull_frame.addPlotable(pull_hist, "P")
 
     # Plot the histograms
-    main_pad = ROOT.TPad("main_pad", "Main Pad", 0, 0.3, 1, 1)
-    pull_pad = ROOT.TPad("pull_pad", "Pull Pad", 0, 0, 1, 0.3)
+    main_pad = ROOT.TPad("main_pad", "Main Pad", 0, 0.5, 1, 1)
+    pull_pad = ROOT.TPad("pull_pad", "Pull Pad", 0, 0, 1, 0.5)
 
     main_pad.SetLogy()
     if logx:
@@ -965,7 +1377,8 @@ def plot_fits(
     pull_pad.Draw()
 
     main_pad.cd()
-    main_frame.SetMinimum(1.1e-3)
+    main_frame.SetMinimum(y_min)
+    main_frame.SetMaximum(main_frame.GetMaximum()*10)
     main_frame.Draw()
 
     legend.Draw()
@@ -978,6 +1391,17 @@ def plot_fits(
     # c.Modified()
     c.Draw()
 
+    # # Save and draw
+    # png_filename = f"{plot_cache}/fit_{random_string()}.png"
+
+    # c.SaveAs(png_filename)
+    # print(f"Saved fit to {png_filename}")
+    
+    # fig, ax = plt.subplots(figsize=(8, 6))
+    # img = plt.imread(png_filename)
+    # ax.imshow(img)
+    # ax.axis('off')
+    # plt.show()
 
 def plot_correlation_matrix(fit_result, title="Correlation Matrix", save_path=None):
     """
@@ -1035,8 +1459,6 @@ def plot_correlation_matrix(fit_result, title="Correlation Matrix", save_path=No
     
     return fig
 
-from typing import List, Dict
-
 def fit_points(ws_cache, points: List[Dict], profile: bool):
     import ROOT
     import pandas as pd
@@ -1084,7 +1506,6 @@ def concatenate_dfs(dfs: List[pd.DataFrame]):
     df = df.drop_duplicates()
     return df
 
-profile_cache = cache.ensure_cache("profiles")
 def scan_parameters(
     model, data, pset,
     constant=True, n_batches=12, use_condor=False,
@@ -1133,16 +1554,16 @@ def scan_parameters(
 
     tasks = []
     for batch in point_batches:
-        tasks.append(condor.Task(fit_points, (ws_cache, batch, constant), {}))
+        tasks.append(so.Task(fit_points, ws_cache, batch, constant))
 
-    df = condor.run_tasks(
+    df = so.run_tasks(
         tasks,
         n_cores=n_batches,
         merge_results_fn=concatenate_dfs,
         use_condor=use_condor,
         cache_results=True if use_condor else False,
         condor_job_name=cache_name,
-        env_wrapper=condor.run_in_mamba,
+        env_wrapper=so.run_in_mamba,
         clear_logs=True,
     )
 
@@ -1168,7 +1589,15 @@ def get_initial(n_components, worst_case=False):
         print(f"Warning: No scan file found for {n_components} components. Using default initial values.")
         return {}
 
-def plot_2D_profile(df: pd.DataFrame, p1_name, p2_name, ax=None, fig=None, plot_contours=True, worst_case=False):
+def plot_2D_profile(
+        df: pd.DataFrame,
+        p1_name, p2_name,
+        ax=None, fig=None,
+        plot_contours=True,
+        worst_case=False,
+        logz=False,
+        random_restarts=None,
+    ):
 
     X_vals = df[p1_name].unique()
     Y_vals = df[p2_name].unique()
@@ -1209,9 +1638,14 @@ def plot_2D_profile(df: pd.DataFrame, p1_name, p2_name, ax=None, fig=None, plot_
         fig = ax.figure
 
     # Contour plot (log scale)
-    cf = ax.contourf(X_grid, Y_grid, delta_nll, levels=50, cmap='viridis')
-    cbar = fig.colorbar(cf, ax=ax)
-    cbar.set_label('ΔNLL')
+    if logz:
+        cf = ax.contourf(X_grid, Y_grid, np.log1p(delta_nll + 1e-6), levels=50, cmap='viridis')
+        cbar = fig.colorbar(cf, ax=ax)
+        cbar.set_label('log10(ΔNLL)')
+    else:
+        cf = ax.contourf(X_grid, Y_grid, delta_nll, levels=50, cmap='viridis')
+        cbar = fig.colorbar(cf, ax=ax)
+        cbar.set_label('ΔNLL')
 
     if plot_contours:
         # Add confidence interval contours (on original delta_nll scale)
@@ -1226,8 +1660,25 @@ def plot_2D_profile(df: pd.DataFrame, p1_name, p2_name, ax=None, fig=None, plot_
     max_y = Y_grid[min_idx]
     ax.plot(max_x, max_y, '.', color='red', markersize=1)
 
+    # Add random restart points if provided
+    if random_restarts is not None:
+        for i, fit_result in enumerate(random_restarts):
+            x_val = fit_result['final_pars'][p1_name]
+            y_val = fit_result['final_pars'][p2_name]
 
-def plot_pair_profiles(df: pd.DataFrame, pset: Dict[str, tuple], plot_contours=True, worst_case=False):
+            if i == len(random_restarts) - 1:
+                ax.plot(x_val, y_val, 'x', color='red', markersize=5, label='Best Solution')
+            else:
+                ax.plot(x_val, y_val, 'x', color='black', markersize=5, label="A Solution")
+        ax.legend()
+
+def plot_pair_profiles(
+        df: pd.DataFrame,
+        pset: Dict[str, tuple],
+        plot_contours=True,
+        worst_case=False,
+        logz=False,
+    ):
     params = list(pset.keys())
     n = len(params)
     fig, axes = plt.subplots(n-1, n-1, figsize=(6*(n-1), 6*(n-1)))
@@ -1241,7 +1692,7 @@ def plot_pair_profiles(df: pd.DataFrame, pset: Dict[str, tuple], plot_contours=T
             if i==j+1:
                 ax.axis('off')
                 continue
-            plot_2D_profile(df, param_x, param_y, ax=ax, fig=fig, plot_contours=plot_contours, worst_case=worst_case)
+            plot_2D_profile(df, param_x, param_y, ax=ax, fig=fig, plot_contours=plot_contours, worst_case=worst_case, logz=logz)
             print(f"Plotting {param_x} vs {param_y} on axes ({j}, {i})")
     
             if j == n-2:
@@ -1359,3 +1810,285 @@ def get_bias_info(toy_model, n_toys, n_events_per_toy_list, n_components):
     # Convert to DataFrame
     df = pd.DataFrame(df)
     return df
+
+def get_normalization(mass):
+    if mass < 700:
+        return 2.5
+    elif mass < 1000:
+        return 0.5
+    elif mass < 1500:
+        return 0.1
+    else:
+        return 0.05
+
+def run_combine_for_mass(mass, sigma, n_components, workspace_base):
+    # import sys
+    # sys.path.insert(0, "/project01/ndcms/atownse2/ExponentialMixtureModel")
+    workspace_dir = f"{workspace_base}/{mass}_{n_components}"
+    normalization = get_normalization(mass)
+    create_combine_workspace(workspace_dir, n_components, mass, sigma, normalization=normalization)
+    combine.run_combine("datacard.txt", "AsymptoticLimits", workspace_dir)
+    combine.run_combine(
+        "datacard.txt",
+        "HybridNew",
+        workspace_dir,
+        extra_args=" ".join([
+            "--LHCmode LHC-limits",
+            # "--singlePoint r=0.7",
+            "--saveHybridResult",
+            "--expectedFromGrid 0.500",
+            "-v 2",
+        ]),
+    )
+
+def profile_likelihood(
+    expectation, bkg_workspace_file, workspace_dir, data_file,
+    r_lo=0, r_hi=20, n_points=50):
+    # create_combine_workspace(workspace_dir, n_components, 3500, 50, expectation)
+    os.makedirs(workspace_dir, exist_ok=True)
+
+    create_signal_workspace(3500, 50, expectation=expectation, workspace_dir=workspace_dir)
+
+    os.system(f"cp {bkg_workspace_file} {workspace_dir}/workspace_bkg.root")
+    os.system(f"cp {data_file} {workspace_dir}/data_ws.root")
+
+    create_datacard(workspace_dir, data_file="data_ws.root", data_workspace="data_ws")
+
+    combine.run_combine(
+        "datacard.txt", "MultiDimFit", workspace_dir, 
+        extra_args=" ".join([
+            "-m 125",
+            "-n .scan",
+            "--algo grid",
+            f"--points {n_points}",
+            f"--setParameterRanges r={r_lo},{r_hi}",
+        ])
+    )
+
+    # plot_script = f"{combine.combine_release_dir}/src/HiggsAnalysis/CombinedLimit/test/plot1DScan.py"
+    multi_dim_fit_file = "higgsCombine.scan.MultiDimFit.mH125.root"
+    command = f"cd {workspace_dir} && plot1DScan.py {multi_dim_fit_file} -o scan"
+    os.system(command)
+
+def create_datacard(
+        workspace_dir,
+        data_file="workspace_bkg.root",
+        data_workspace="workspace_bkg",
+        expectSignal=10,
+        signal_mass=None,
+        ):
+    
+    if signal_mass is not None:
+        expectSignal = expect_signal(signal_mass)
+
+    datacard = textwrap.dedent(f"""
+        ---------------------------------------------
+        imax 1
+        jmax 1
+        kmax *
+        ---------------------------------------------
+        shapes      sig           SR      workspace_sig.root      workspace_sig:model_sig
+        shapes      bkg           SR      workspace_bkg.root      workspace_bkg:model_bkg
+        shapes      data_obs      SR      workspace_data.root      workspace_data:data
+        ---------------------------------------------
+        bin             SR
+        observation     -1
+        ---------------------------------------------
+        bin             SR           SR
+        process         sig          bkg
+        process         0            1
+        rate            {expectSignal}       1.0
+        ---------------------------------------------
+        lumi_13TeV lnN  1.025        -
+        ----------------------------------------------
+        sig_mean_nuisance param 0 1
+        sig_sigma_nuisance param 0 1
+        ----------------------------------------------
+        """)
+
+    with open(f"{workspace_dir}/datacard.txt", "w") as f:
+        f.write(datacard)
+    # print(f"Created datacard {workspace_dir}/datacard.txt")
+
+def get_data_workspace(workspace_dir=workspace_cache):
+
+    data_workspace_cache = f"{workspace_cache}/workspace_data.root"
+    if os.path.exists(data_workspace_cache):
+        if workspace_dir is not None:
+            os.makedirs(workspace_dir, exist_ok=True)
+            os.system(f"cp {data_workspace_cache} {workspace_dir}/workspace_data.root")
+            print(f"Copied data workspace to {workspace_dir}/.")
+        f = ROOT.TFile(data_workspace_cache, "READ")
+        ws = f.Get("workspace_data")
+        f.Close()
+        return ws
+
+    os.makedirs(workspace_dir, exist_ok=True)
+    
+    data_tree = get_data(tree=True)
+    x = ROOT.RooRealVar("x", "Diphoton Mass [GeV]", 500, 10_000)
+    data = ROOT.RooDataSet(
+        "data", "data",
+        data_tree,
+        ROOT.RooArgSet(x),
+    )
+    
+    ws = ROOT.RooWorkspace("workspace_data", "Workspace for data")
+    getattr(ws, 'import')(data)
+    # ws.SaveAs(f"{workspace_dir}/data_ws.root")
+    ws.SaveAs(data_workspace_cache)
+
+    os.system(f"cp {data_workspace_cache} {workspace_dir}/workspace_data.root")
+    print(f"Created data workspace at {workspace_dir}/workspace_data.root")
+    return ws
+
+def get_background_workspace(
+        workspace_dir,
+        n_components,
+        data=None,
+        x=None,
+    ):
+
+    assert (data is None and x is None) or (data is not None and x is not None), "Either both data and x must be provided, or neither."
+
+    if data is None:
+        data_ws = get_data_workspace(workspace_dir)
+        data = data_ws.data("data")
+        x = data_ws.var("x")
+
+    # Initialize model
+    model = ExponentialMixtureModel(x, n_components)
+    model.pdf.fitTo(data)
+    model.pdf.SetName("model_bkg")
+
+    # Create background normalization object
+    norm = ROOT.RooRealVar(
+        "model_bkg_norm", "Background normalization",
+        data.numEntries(), 0, 3*data.numEntries()
+    )
+
+    # Create workspace and import model and data
+    ws = ROOT.RooWorkspace("workspace_bkg", "Workspace for background model")
+    getattr(ws, 'import')(data)
+    getattr(ws, 'import')(norm)
+    getattr(ws, 'import')(model.pdf)
+    ws.SaveAs(f"{workspace_dir}/workspace_bkg.root")
+
+    return ws
+
+def get_signal_workspace(workspace_dir: str, mean: float, sigma: float, expectation=0.0003):
+    x = ROOT.RooRealVar("x", "Diphoton Mass [GeV]", 500, 4000)
+
+    mean_nominal = ROOT.RooRealVar("sig_mean_nominal", "Nominal signal mean", mean)
+    mean_nominal.setConstant(True)
+    sigma_nominal = ROOT.RooRealVar("sig_sigma_nominal", "Nominal signal sigma", sigma)
+    sigma_nominal.setConstant(True)
+
+    mean_nuisance = ROOT.RooRealVar("sig_mean_nuisance", "Signal mean nuisance", 0, -5, 5)
+    sigma_nuisance = ROOT.RooRealVar("sig_sigma_nuisance", "Signal sigma nuisance", 0, -5, 5)
+
+    mean = ROOT.RooFormulaVar(
+        "sig_mean",
+        "Signal mean with nuisance",
+        "sig_mean_nominal*(1 + 0.001*sig_mean_nuisance)",
+        ROOT.RooArgList(mean_nominal, mean_nuisance)
+    )
+    sigma = ROOT.RooFormulaVar(
+        "sig_sigma",
+        "Signal sigma with nuisance",
+        "sig_sigma_nominal*(1 + 0.01*sig_sigma_nuisance)",
+        ROOT.RooArgList(sigma_nominal, sigma_nuisance)
+    )
+
+    signal_pdf = ROOT.RooGaussian("model_sig", "Gaussian Signal PDF", x, mean, sigma)
+
+    # norm = ROOT.RooRealVar("model_sig_norm", "Signal normalization", expectation) # TODO this might need to be mrore complicated
+
+    ws = ROOT.RooWorkspace("workspace_sig", "Workspace for signal model")
+    getattr(ws, 'import')(signal_pdf)
+    ws.SaveAs(f"{workspace_dir}/workspace_sig.root")
+    return ws
+
+def setup_workspace(
+        workspace_dir,
+        n_components,
+        signal_point,
+        remake=False
+        ):
+
+    if os.path.exists(f"{workspace_dir}/datacard.txt") and remake:
+        os.system(f"rm -rf {workspace_dir}")
+
+    os.makedirs(workspace_dir, exist_ok=True)
+    
+    data_ws = get_data_workspace(workspace_dir)
+    bkg_ws = get_background_workspace(workspace_dir, n_components)
+    signal_ws = get_signal_workspace(workspace_dir, mean=signal_point[0], sigma=signal_point[1])
+    create_datacard(workspace_dir)
+
+def run_significance(workspace_dir, n_components, signal_point, remake=False):
+
+    setup_workspace(workspace_dir, n_components, signal_point, remake=remake)
+    combine.run_combine("datacard.txt", "FitDiagnostics", workspace_dir, extra_args="--plots")
+    combine.run_combine("datacard.txt", "Significance", workspace_dir, extra_args="-v 2")
+
+def run_combine_profile_likelihood_comparison(
+    workspace_base,
+    workspace_paths,
+    signal_workspace_file,
+    background_workspace_files,
+    data_file,
+    signal_mass,
+):
+    multi_dim_fit_file = lambda p: f"{p}/higgsCombine.scan.MultiDimFit.mH125.root"
+
+    for workspace_path, background_workspace_file in zip(workspace_paths, background_workspace_files):
+        if os.path.exists(multi_dim_fit_file(workspace_path)):
+            print(f"Skipping existing workspace at {workspace_path}")
+            continue
+        os.makedirs(workspace_path, exist_ok=True)
+        os.system(f"cp {signal_workspace_file} {workspace_path}/workspace_sig.root")
+        os.system(f"cp {background_workspace_file} {workspace_path}/workspace_bkg.root")
+        os.system(f"cp {data_file} {workspace_path}/data_ws.root")
+        create_datacard(workspace_path, data_file="data_ws.root", data_workspace="data_ws", signal_mass=signal_mass)
+        combine.run_combine(
+            "datacard.txt", "MultiDimFit", workspace_path, 
+            extra_args=" ".join([
+                "-m 125",
+                "-n .scan",
+                "--algo grid",
+                "--points 50",
+                "--setParameterRanges r=0,20",
+                # "--pointsRandProf 20",
+                "-v 2",
+            ])
+        )
+    
+    scan_command = f'plot1DScan.py -o scan {workspace_paths[0]}/higgsCombine.scan.MultiDimFit.mH125.root --main-label "{os.path.basename(workspace_paths[0])}" --main-color 1 --others '
+    others = [f'{multi_dim_fit_file(p)}:"{os.path.basename(p)}":{i+2}' for i, p in enumerate(workspace_paths[1:])]
+    scan_command += " ".join(others)
+    
+    combine.run_in_cmssw(workspace_base, scan_command)
+
+def expect_signal(mass):
+    # Approximately a 2 sigma significance
+    if mass < 550:
+        return 100
+    elif mass < 750:
+        return 90
+    elif mass < 850:
+        return 60
+    elif mass < 1100:
+        return 30
+    elif mass < 1400:
+        return 20
+    elif mass < 1550:
+        return 10
+    elif mass < 2050:
+        return 8
+    elif mass < 2600:
+        return 3
+    elif mass < 3300:
+        return 2
+    else:
+        return 1

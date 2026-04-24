@@ -1,0 +1,13 @@
+name: emm-env
+channels:
+  - conda-forge
+dependencies:
+  - root=6.30.4
+  - awkward
+  - pandas
+  - nbconvert
+  - pandoc
+  - ipython
+  - ipywidgets
+  - ipympl
+  - ipykernel
