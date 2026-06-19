@@ -322,6 +322,37 @@ def evaluate_pdf(x, model, x_vals):
     norm = values[0] / first
     return values / norm
 
+import re
+
+def latex_to_root_formula(latex_str):
+    """
+    Converts a simple LaTeX mathematical string into a ROOT TFormula string.
+    """
+    root_str = latex_str
+    
+    # 1. Handle fractions: \frac{numerator}{denominator} -> ((numerator)/(denominator))
+    # Note: This handles single-level fractions. Nested fractions would require a more complex parser.
+    root_str = re.sub(r'\\frac\{([^}]+)\}\{([^}]+)\}', r'((\1)/(\2))', root_str)
+    
+    # 2. Handle exponents with braces: x^{2y} -> x^(2y)
+    root_str = re.sub(r'\^\{([^}]+)\}', r'^(\1)', root_str)
+    
+    # 3. Handle square roots: \sqrt{x} -> sqrt(x)
+    root_str = re.sub(r'\\sqrt\{([^}]+)\}', r'sqrt(\1)', root_str)
+    
+    # 4. Remove backslashes for standard functions and Greek letters
+    # Example: \sin(x) -> sin(x), \alpha -> alpha, \exp(-x) -> exp(-x)
+    root_str = re.sub(r'\\([a-zA-Z]+)', r'\1', root_str)
+    
+    # 5. Convert any remaining structural LaTeX braces to standard parentheses
+    # (ROOT requires parentheses for grouping)
+    root_str = root_str.replace('{', '(').replace('}', ')').replace("$", "")
+    
+    # 6. Clean up unnecessary spacing
+    root_str = root_str.strip()
+    
+    return root_str
+
 class RooFitModel:
     name = "GenericRooFitModel"
 
@@ -386,6 +417,32 @@ class RooFitModel:
         print(f"Model: {self.name}")
         for par in self.params():
             print_par(par)
+
+class GeneralizedPareto(RooFitModel):
+    name = "GPD"
+    formula = "$(N/p_1)*(1 + p_2*(x-x_min)/p_1)^{-1-1/p_2}$"
+
+    def __init__(self, x, **kwargs):
+        p1_name = "p1"
+        p2_name = "p2"
+        pdf_name = kwargs.get("pdf_name", self.name)
+        if "prefix" in kwargs:
+            p1_name = f"{kwargs['prefix']}_{p1_name}"
+            p2_name = f"{kwargs['prefix']}_{p2_name}"
+            pdf_name = f"{kwargs['prefix']}_{pdf_name}"
+
+        self.p1 = ROOT.RooRealVar(p1_name, p1_name, 0.5, 0, 10)
+        self.p2 = ROOT.RooRealVar(p2_name, p2_name, 1000, 0.01, 10000)
+
+        self.pdf = ROOT.RooGenericPdf(
+            pdf_name,
+            f"(1/{p2_name})*pow(1 + {p1_name}*({x.GetName()}-{x.getMin()})/{p2_name}, -1 - 1/{p1_name})",  # Formula for the PDF
+            ROOT.RooArgList(self.p2, self.p1, x)  # Arguments for the formula
+        )
+    
+    def params(self):
+        return [self.p1, self.p2]
+
 
 class f1(RooFitModel):
     name="f_1"
@@ -608,6 +665,7 @@ class ExponentialMixtureModel(MixtureModel):
         rate_scaling = -1/(data_mean - x.getMin())
         # data_mean = 200
         # rate_scaling = -1/data_mean
+        random_initialization = False
         if "random" in self.kwargs:
             random_initialization = self.kwargs["random"]
 
@@ -679,6 +737,45 @@ class ExponentialMixtureModel(MixtureModel):
         Return the parameters of the model.
         """
         return self.raw_rates + self.raw_weights
+
+class GPDMixtureModel(MixtureModel):
+    def init_pdfs(self, x):
+        self.init_powers()
+        if "max_x" in self.kwargs:
+            self.x_max = self.kwargs["max_x"]
+        else:
+            print(f"Warning: max_x not provided for GPDMixtureModel, using x.getMax() = {x.getMax()}")
+            self.x_max = x.getMax()
+        
+        self.pdfs = [
+            ROOT.RooGenericPdf(
+                f"pdf_{i}",
+                f"{self.weights[i].GetName()}*pow(1 - ({x.GetName()}-{self.x.getMin()})/({self.x_max}-{self.x.getMin()}), {self.powers[i].GetName()})",
+                ROOT.RooArgList(self.weights[i], self.powers[i], x)
+            ) for i in range(self.n_components)
+        ]
+
+    def init_powers(self):
+        self.powers = [
+            ROOT.RooRealVar(
+                f"power_{i}",
+                f"Power for component {i}",
+                5 + i*10,
+                -1,
+                100_000
+            ) for i in range(self.n_components)
+        ]
+    
+    def params(self):
+        """
+        Return the parameters of the model.
+        """
+        return self.powers + self.raw_weights
+
+class GPDMixtureModel_2(GPDMixtureModel):
+    name = "GPD-Mixture-2"
+    def __init__(self, x, **kwargs):
+        super().__init__(x, 2, **kwargs)
 
 class ExponentialMixtureModel_1(ExponentialMixtureModel):
     name = "ExponentialMixture-1"
@@ -1006,14 +1103,6 @@ def ordered_penalty(rate_diffs, weights, penalty_strength=0.1):
     )
     return penalty
 
-def create_combine_workspace(workspace_dir, n_components, mean, sigma, expectation=1):
-    if not os.path.exists(workspace_dir):
-        os.makedirs(workspace_dir, exist_ok=True)
-    
-    create_background_workspace(n_components, workspace_dir=workspace_dir)
-    create_signal_workspace(mean, sigma, expectation=expectation, workspace_dir=workspace_dir)
-    create_datacard(workspace_dir)
-    print(f"Finished creating workspace in {workspace_dir}/.")
 
 fit_options = [
     # ROOT.RooFit.IntegrateBins(0.0001),
@@ -1244,25 +1333,281 @@ def fit_and_plot(
     if hasattr(model, 'print') and print_pars:
         model.print()
 
-default_colors = ['#377eb8', '#ff7f00', '#4daf4a',
-            '#f781bf', '#984ea3', '#999999', '#e41a1c', '#dede00']
+# default_colors = ['#377eb8', '#ff7f00', '#4daf4a',
+            # '#f781bf', '#984ea3', '#999999', '#e41a1c', '#dede00']
+
+default_colors = [
+    "#D55E00",  # Vermillion
+    "#CC79A7",  # Reddish Purple
+    "#009E73",  # Bluish Green
+    "#F0E442",  # Yellow
+    "#0072B2",  # Blue
+    "#56B4E9",  # Sky Blue
+    "#E69F00",  # Orange
+    # "#000000"   # Black
+]
+
+# default_colors = [
+#     "#648FFF",  # Ultramarine
+#     "#785EF0",  # Indigo
+#     "#DC267F",  # Magenta
+#     "#FE6100",  # Orange
+#     "#FFB000"   # Gold
+# ]
+
 default_root_colors = [ROOT.TColor.GetColor(c) for c in default_colors]
+
+def compute_information_criteria(nll, n_params, n_observations):
+    if n_observations <= 0:
+        raise ValueError("n_observations must be positive")
+
+    return {
+        "AIC": 2 * n_params + 2 * nll,
+        "BIC": n_params * np.log(n_observations) + 2 * nll,
+    }
+
+def rebin_for_low_stats(hist, min_events=30):
+    """
+    Dynamically merges adjacent bins of a TH1 histogram until every bin 
+    contains at least `min_events`. Returns a new variable-bin-width TH1.
+    """
+    edges = [hist.GetBinLowEdge(1)]
+    current_events = 0
+    
+    for b in range(1, hist.GetNbinsX() + 1):
+        current_events += hist.GetBinContent(b)
+        # If the accumulated events hit the threshold, seal the bin edge
+        if current_events >= min_events:
+            edges.append(hist.GetBinLowEdge(b) + hist.GetBinWidth(b))
+            current_events = 0
+            
+    # Handle leftovers: merge remaining events into the final bin
+    if current_events > 0 and len(edges) > 1:
+        edges[-1] = hist.GetBinLowEdge(hist.GetNbinsX()) + hist.GetBinWidth(hist.GetNbinsX())
+    elif len(edges) == 1:
+        # Fallback if the entire histogram has fewer than min_events
+        edges.append(hist.GetBinLowEdge(hist.GetNbinsX()) + hist.GetBinWidth(hist.GetNbinsX()))
+        
+    # Convert list to a C-style double array for ROOT
+    edges_arr = array('d', edges)
+    
+    # TH1::Rebin handles the recalculation of contents and SumW2 errors automatically
+    rebinned_hist = hist.Rebin(len(edges_arr) - 1, f"{hist.GetName()}_rebinned", edges_arr)
+    return rebinned_hist
+
+def chi2(x, hist, model, min_events=5, print_chi2=False, integrate_bins_precision=1e-3):
+    """
+    Compute chi2 for a 1D RooDataHist after merging adjacent bins
+    until each combined bin contains at least min_events observed entries.
+    """
+    if min_events < 0:
+        raise ValueError("min_events must be non-negative")
+
+    if integrate_bins_precision is not None and integrate_bins_precision <= 0:
+        raise ValueError("integrate_bins_precision must be positive or None")
+
+    if not hasattr(model, "pdf") or not hasattr(model, "params"):
+        raise TypeError("model must provide pdf and params()")
+
+    pdf = model.pdf
+
+    # Rebin the histogram to ensure at least min_events per bin
+    rebinned_hist = rebin_for_low_stats(hist, min_events=min_events)
+    n_combined_bins = rebinned_hist.GetNbinsX()
+    ndf = n_combined_bins - len(model.params())
+
+    rebinned_data = ROOT.RooDataHist(
+        f"{rebinned_hist.GetName()}_rebinned",
+        f"{rebinned_hist.GetTitle()} (rebinned)",
+        x,
+        rebinned_hist
+    )
+
+    chi2_args = []
+    if integrate_bins_precision is not None:
+        # Integrate the PDF across each rebinned bin. Point sampling at the bin
+        # center can strongly overestimate chi2 for steeply falling models.
+        chi2_args.append(ROOT.RooFit.IntegrateBins(integrate_bins_precision))
+
+    chi2_var = ROOT.RooChi2Var(
+        f"chi2_var_{random_string()}",
+        "chi2",
+        pdf,
+        rebinned_data,
+        *chi2_args,
+    )
+    raw_chi2 = float(chi2_var.getVal())
+    result = {
+        "chi2": raw_chi2,
+        "ndf": ndf,
+        "chi2_ndf": raw_chi2 / ndf,
+        "n_combined_bins": int(n_combined_bins),
+        "min_events": min_events,
+        "integrate_bins_precision": integrate_bins_precision,
+        "binned_data": rebinned_data,
+        "hist": rebinned_hist,
+        "bin_edges": rebinned_hist.GetXaxis().GetXbins(),
+    }
+
+    if print_chi2:
+        print(
+            f"chi2={result['chi2']:.2f}, ndf={result['ndf']}, "
+            f"chi2/ndf={result['chi2_ndf']:.3f}, "
+        )
+
+    return result
+
+def plot_information_criteria(
+    criteria_by_x,
+    x_values=None,
+    figsize=(8, 3),
+    x_label="Number of Components (k)",
+    aic_key="AIC",
+    bic_key="BIC",
+    aic_label="$\Delta\\text{AIC}$",
+    bic_label="$\Delta\\text{BIC}$",
+    aic_color="red",
+    bic_color="blue",
+    bic_marker="x",
+    aic_marker_size=100,
+    bic_marker_size=100,
+    label_size=18,
+    tick_label_size=None,
+    legend_label_size=None,
+    legend_loc="upper center",
+    sort_x=True,
+    show=True,
+):
+    if isinstance(criteria_by_x, dict):
+        items = list(criteria_by_x.items())
+    else:
+        if x_values is None:
+            raise ValueError("x_values is required when criteria_by_x is not a dictionary")
+        items = list(zip(x_values, criteria_by_x))
+
+    if not items:
+        raise ValueError("No information criteria were provided")
+
+    if sort_x:
+        try:
+            items = sorted(items, key=lambda item: item[0])
+        except TypeError:
+            pass
+
+    plot_values = [item[0] for item in items]
+    aic_values = []
+    bic_values = []
+    for x_value, criteria in items:
+        if aic_key not in criteria or bic_key not in criteria:
+            raise KeyError(
+                f"Missing {aic_key} or {bic_key} for {x_value}"
+            )
+        aic_values.append(criteria[aic_key])
+        bic_values.append(criteria[bic_key])
+
+    aic_values = np.array(aic_values)
+    bic_values = np.array(bic_values)
+
+    aic_values -= np.min(aic_values)
+    bic_values -= np.min(bic_values)
+
+    use_numeric_axis = all(
+        isinstance(value, (int, float, np.integer, np.floating))
+        for value in plot_values
+    )
+    if use_numeric_axis:
+        x_coords = plot_values
+        x_tick_labels = None
+    else:
+        x_coords = np.arange(len(plot_values))
+        x_tick_labels = plot_values
+
+    fig, ax1 = plt.subplots(1, figsize=figsize)
+
+    ax1.scatter(x_coords, aic_values, color=aic_color, label=aic_label, s=aic_marker_size)
+    ax1.set_xlabel(x_label, fontsize=label_size)
+    ax1.set_ylabel(aic_label, color=aic_color, fontsize=label_size)
+    ax1.tick_params(axis='y', labelcolor=aic_color, labelsize=tick_label_size)
+    ax1.set_xticks(x_coords)
+    ax1.tick_params(axis='x', labelsize=tick_label_size)
+    if x_tick_labels is not None:
+        ax1.set_xticklabels(x_tick_labels)
+
+    ax2 = ax1.twinx()
+    ax2.scatter(
+        x_coords,
+        bic_values,
+        color=bic_color,
+        label=bic_label,
+        marker=bic_marker,
+        s=bic_marker_size,
+    )
+    ax2.set_ylabel(bic_label, color=bic_color, fontsize=label_size)
+    ax2.tick_params(axis='y', labelcolor=bic_color, labelsize=tick_label_size)
+
+    handles1, labels1 = ax1.get_legend_handles_labels()
+    handles2, labels2 = ax2.get_legend_handles_labels()
+    ax1.legend(
+        handles1 + handles2,
+        labels1 + labels2,
+        loc=legend_loc,
+        fontsize=legend_label_size,
+    )
+
+    fig.tight_layout()
+    if show:
+        plt.show()
+
+    return fig, ax1, ax2
+
+def roo_hist_to_th1(roo_hist, name):
+    n_points = roo_hist.GetN()
+    x_values = list(roo_hist.GetX())
+    y_values = list(roo_hist.GetY())
+
+    if n_points == 0:
+        return ROOT.TH1D(name, "", 1, 0.0, 1.0)
+
+    if n_points == 1:
+        width = 1.0
+        edges = [x_values[0] - width / 2.0, x_values[0] + width / 2.0]
+    else:
+        edges = [x_values[0] - (x_values[1] - x_values[0]) / 2.0]
+        for i in range(n_points - 1):
+            edges.append((x_values[i] + x_values[i + 1]) / 2.0)
+        edges.append(x_values[-1] + (x_values[-1] - x_values[-2]) / 2.0)
+
+    hist = ROOT.TH1D(name, "", len(edges) - 1, array('d', edges))
+    hist.SetDirectory(0)
+    for i, value in enumerate(y_values):
+        hist.SetBinContent(i + 1, value)
+    return hist
 
 def plot_fits(
     data, x, #bins,
     models,
-    model_labels,
+    labels,
     title=None,
     logx=False,
     x_label=None,
     nbins=None,
     plot_range=None,
+    pull_range=(-4, 4),
     binning=None,
-    # colors = [ROOT.kP6Blue, ROOT.kP6Yellow, ROOT.kP6Red, ROOT.kP6Grape],
     colors = default_root_colors,
-    y_min=1.1e-3,
+    linestyles=None,
+    y_min=1.1e-1,
+    markersize=1.5,
+    linewidth=2,
+    title_size=0.12, label_size=0.09,
+    logy=True,
+    legend_bounds=(0.55, 0.56, 0.95, 0.85),
+    legend_columns=2,
+    legend_text_size=0.064,
+    legend_margin=0.18,
+    pull_fill_style=1001,
+    pull_fill_alpha=0.3,
     ):
-    # colors = [hex_to_tcolor(c) if isinstance(c, str) else c for c in colors]
 
     c = ROOT.TCanvas(random_string(), "canvas", 1600, 800)
     c.cd()
@@ -1289,96 +1634,169 @@ def plot_fits(
     else:
         main_frame.SetTitle("")
 
-    title_size = 0.1
-    label_size = 0.06
-
+    main_frame.GetXaxis().SetTitle(x_label if x_label is not None else x.GetTitle())
+    main_frame.GetYaxis().SetTitle("Events / bin")
+    main_frame.GetYaxis().CenterTitle(True)
     main_frame.GetYaxis().SetTitleSize(title_size)
-    main_frame.GetYaxis().SetTitleOffset(0.35)
+    main_frame.GetYaxis().SetTitleOffset(0.42)
     main_frame.GetYaxis().SetLabelSize(label_size)
 
     pull_frame = x.frame()
     pull_frame.SetTitle("")  # Remove title
     pull_frame.GetYaxis().SetTitleSize(title_size)
-    pull_frame.GetYaxis().SetTitleOffset(0.35)
-    pull_frame.GetYaxis().SetTitle("Pull")
+    pull_frame.GetYaxis().SetTitleOffset(0.37)
+    pull_frame.GetYaxis().SetTitle("#frac{data - fit}{#sigma_{data}}")
+    pull_frame.GetYaxis().CenterTitle(True)
     pull_frame.GetYaxis().SetLabelSize(label_size)
-    pull_frame.GetYaxis().SetNdivisions(5, 0, 0, True)
-    pull_frame.GetYaxis().SetRangeUser(-4.9, 4.9)
+    pull_frame.GetYaxis().SetNdivisions(104, False)
 
     # Add dashed line at y=0
-    line = ROOT.TLine(x.getMin(), 0, x.getMax(), 0)
+    min_x = x.getMin()
+    max_x = x.getMax()
+    if plot_range is not None:
+        min_x, max_x = plot_range
+    line = ROOT.TLine(min_x, 0, max_x, 0)
     line.SetLineStyle(ROOT.kDashed)
     line.SetLineColor(ROOT.kBlack)
     pull_frame.addObject(line)
 
-    pull_frame.GetXaxis().SetTitleSize(title_size)
-    pull_frame.GetXaxis().SetLabelSize(label_size)
-    if x_label is not None:
-        pull_frame.GetXaxis().SetTitle(x_label)
-    else:
-        pull_frame.GetXaxis().SetTitle(x.GetTitle())
+    pull_frame.GetXaxis().SetTitleSize(title_size + 0.02)
+    pull_frame.GetXaxis().SetTitleOffset(1.1)
+    pull_frame.GetXaxis().CenterTitle(True)
+    pull_frame.GetXaxis().SetLabelSize(label_size + 0.01)
+    pull_frame.GetXaxis().SetTitle(x_label if x_label is not None else x.GetTitle())
+
     
     if plot_range is not None:
         main_frame.GetXaxis().SetRangeUser(*plot_range)
         pull_frame.GetXaxis().SetRangeUser(*plot_range)
 
-    # Create a legend
-    legend = ROOT.TLegend(0.55, 0.40, 0.99, 0.89)
-    legend.SetTextFont(42)
-    legend.SetTextSize(0.06)
-    legend.SetBorderSize(0)
-    legend.SetFillStyle(0)  # Transparent legend background
+    if logx:
+        # Improve readability on log-x by drawing labels on intermediate ticks.
+        main_frame.GetXaxis().SetMoreLogLabels(True)
+        pull_frame.GetXaxis().SetMoreLogLabels(True)
+        main_frame.GetXaxis().SetNoExponent(True)
+        pull_frame.GetXaxis().SetNoExponent(True)
 
     # Plot data and fits
-    data.plotOn(main_frame)
-    legend.AddEntry(data, "Data", "p")
+    data_reference_name = "plot_data_reference"
+    data_name = "plot_data"
+    data.plotOn(
+        main_frame,
+        ROOT.RooFit.Name(data_reference_name),
+        ROOT.RooFit.MarkerSize(0),
+        ROOT.RooFit.LineColor(0),
+    )
+
+    curve_specs = []
+    pull_specs = []
     for i, model in enumerate(models):
-        if isinstance(model, RooFitModel):
+        if hasattr(model, "pdf"):
             pdf = model.pdf
         else:
             pdf = model
 
-        model_label = model_labels[i]
+        model_label = labels[i]
+        if colors is not None:
+            if len(colors) == 0:
+                raise ValueError("colors must not be empty when provided")
+            model_color = colors[i % len(colors)]
+        else:
+            model_color = colors[i % len(colors)]
+        if isinstance(model_color, str):
+            model_color = ROOT.TColor.GetColor(model_color)
+
+        if linestyles is not None:
+            if len(linestyles) == 0:
+                raise ValueError("linestyles must not be empty when provided")
+            line_style = linestyles[i % len(linestyles)]
+            if isinstance(line_style, str):
+                line_style_lookup = {
+                    "solid": 1,
+                    "dashed": 2,
+                    "dotted": 3,
+                    "dashdotted": 4,
+                    "dashdot": 4,
+                }
+                line_style = line_style_lookup.get(line_style.strip().lower())
+                if line_style is None:
+                    raise ValueError(f"Unsupported line style: {model_linestyles[i % len(model_linestyles)]}")
+        else:
+            line_style = ROOT.kSolid
+
+        curve_name = f"plot_curve_{i}"
 
         pdf.plotOn(
             main_frame,
             ROOT.RooFit.Precision(1e-5),
-            ROOT.RooFit.IntegrateBins(1e-4),
-            ROOT.RooFit.LineColor(colors[i]),
-            ROOT.RooFit.Name(model_label),  # Name for the PDF in the legend
+            ROOT.RooFit.LineColor(model_color),
+            ROOT.RooFit.LineStyle(line_style),
+            ROOT.RooFit.LineWidth(int(linewidth)),
+            ROOT.RooFit.Name(curve_name),
             ROOT.RooFit.DrawOption("L"),  # Use "L" for line only
         )
-        
-        curve_obj = main_frame.findObject(model_label)
-        if curve_obj:
-            legend.AddEntry(curve_obj, model_label, "l")
+        curve_specs.append((curve_name, model_label, model_color))
 
-        # Pull
-        pull_hist = main_frame.pullHist()
-        pull_hist.SetLineColor(colors[i])
-        pull_hist.SetMarkerColor(colors[i])
+    data.plotOn(
+        main_frame,
+        ROOT.RooFit.Name(data_name),
+        ROOT.RooFit.MarkerSize(markersize),
+    )
 
-        pull_frame.addPlotable(pull_hist, "P")
+    for curve_name, model_label, model_color in curve_specs:
+        pull_hist = main_frame.pullHist(data_reference_name, curve_name)
+        pull_hist.SetLineColor(model_color)
+        pull_hist.SetMarkerColor(model_color)
+        pull_hist.SetMarkerSize(markersize)
+        pull_hist.SetLineWidth(int(linewidth))
+        pull_specs.append((pull_hist, model_color, pull_fill_style))
 
     # Plot the histograms
     main_pad = ROOT.TPad("main_pad", "Main Pad", 0, 0.5, 1, 1)
     pull_pad = ROOT.TPad("pull_pad", "Pull Pad", 0, 0, 1, 0.5)
 
-    main_pad.SetLogy()
+    if logy:
+        main_pad.SetLogy()
     if logx:
         main_pad.SetLogx()
+    main_pad.SetTopMargin(0.12)
+    main_pad.SetLeftMargin(0.12)
+    main_pad.SetRightMargin(0.04)
     main_pad.SetBottomMargin(0)
     main_pad.Draw()
 
     if logx:
         pull_pad.SetLogx()
+    pull_pad.SetLeftMargin(0.12)
+    pull_pad.SetRightMargin(0.04)
     pull_pad.SetTopMargin(0)
-    pull_pad.SetBottomMargin(0.35)
+    pull_pad.SetBottomMargin(0.38)
     pull_pad.Draw()
+
+    legend_x1, legend_y1, legend_x2, legend_y2 = legend_bounds
+    legend = ROOT.TLegend(legend_x1, legend_y1, legend_x2, legend_y2)
+    legend.SetNColumns(legend_columns)
+    legend.SetTextFont(42)
+    legend.SetTextSize(legend_text_size)
+    legend.SetBorderSize(0)
+    legend.SetFillStyle(0)  # Transparent legend background
+    legend.SetMargin(legend_margin)
+
+    data_obj = main_frame.findObject(data_name)
+    if data_obj:
+        legend.AddEntry(data_obj, "Data", "lp")
+
+    for curve_name, model_label, model_color in curve_specs:
+        curve_obj = main_frame.findObject(curve_name)
+        if curve_obj:
+            legend.AddEntry(curve_obj, model_label, "l")
 
     main_pad.cd()
     main_frame.SetMinimum(y_min)
-    main_frame.SetMaximum(main_frame.GetMaximum()*10)
+    if logy:
+        main_frame.SetMaximum(main_frame.GetMaximum() * 10)
+    else:
+        main_frame.SetMaximum(main_frame.GetMaximum() * 1.2)
     main_frame.Draw()
 
     legend.Draw()
@@ -1387,10 +1805,47 @@ def plot_fits(
     pull_pad.cd()
     pull_frame.Draw()
 
+    pull_hist_frame = next(
+        (prim for prim in pull_pad.GetListOfPrimitives() if isinstance(prim, ROOT.TH1)),
+        None,
+    )
+    if pull_hist_frame is not None:
+        pull_hist_frame.SetMinimum(pull_range[0])
+        pull_hist_frame.SetMaximum(pull_range[1])
+        pull_hist_frame.GetYaxis().SetNdivisions(104, False)
+        pull_hist_frame.GetYaxis().SetTitle("#frac{data - fit}{#sigma_{data}}")
+        pull_hist_frame.GetYaxis().CenterTitle(True)
+        pull_hist_frame.GetYaxis().SetTitleSize(title_size)
+        pull_hist_frame.GetYaxis().SetTitleOffset(0.37)
+        pull_hist_frame.GetYaxis().SetLabelSize(label_size)
+        pull_hist_frame.GetXaxis().SetTitle(x_label if x_label is not None else x.GetTitle())
+        pull_hist_frame.GetXaxis().SetTitleSize(title_size + 0.02)
+        pull_hist_frame.GetXaxis().SetTitleOffset(1.1)
+        pull_hist_frame.GetXaxis().CenterTitle(True)
+        pull_hist_frame.GetXaxis().SetLabelSize(label_size + 0.01)
+
+    filled_pull_hists = []
+    for i, (pull_hist, model_color, fill_style) in enumerate(pull_specs):
+        filled_hist = roo_hist_to_th1(pull_hist, f"pull_fill_{i}_{random_string()}")
+        # filled_hist.SetMinimum(
+        # filled_hist.SetMaximum(4.0)
+        filled_hist.SetLineColor(model_color)
+        filled_hist.SetLineWidth(1)
+        filled_hist.SetFillColorAlpha(model_color, pull_fill_alpha)
+        filled_hist.SetFillStyle(fill_style)
+        filled_hist.Draw("HIST SAME")
+        filled_pull_hists.append(filled_hist)
+
+    line.Draw("SAME")
+
+    c._pull_filled_hists = filled_pull_hists
+    c._pull_line = line
+
     c.Update()
     # c.Modified()
     c.Draw()
 
+    return c
     # # Save and draw
     # png_filename = f"{plot_cache}/fit_{random_string()}.png"
 
@@ -1539,7 +1994,6 @@ def scan_parameters(
             import pandas as pd
             df = pd.read_csv(cache_file)
             return df
-
 
     # Profile each pair of parameters
     pset_linspaces = {
@@ -1810,285 +2264,3 @@ def get_bias_info(toy_model, n_toys, n_events_per_toy_list, n_components):
     # Convert to DataFrame
     df = pd.DataFrame(df)
     return df
-
-def get_normalization(mass):
-    if mass < 700:
-        return 2.5
-    elif mass < 1000:
-        return 0.5
-    elif mass < 1500:
-        return 0.1
-    else:
-        return 0.05
-
-def run_combine_for_mass(mass, sigma, n_components, workspace_base):
-    # import sys
-    # sys.path.insert(0, "/project01/ndcms/atownse2/ExponentialMixtureModel")
-    workspace_dir = f"{workspace_base}/{mass}_{n_components}"
-    normalization = get_normalization(mass)
-    create_combine_workspace(workspace_dir, n_components, mass, sigma, normalization=normalization)
-    combine.run_combine("datacard.txt", "AsymptoticLimits", workspace_dir)
-    combine.run_combine(
-        "datacard.txt",
-        "HybridNew",
-        workspace_dir,
-        extra_args=" ".join([
-            "--LHCmode LHC-limits",
-            # "--singlePoint r=0.7",
-            "--saveHybridResult",
-            "--expectedFromGrid 0.500",
-            "-v 2",
-        ]),
-    )
-
-def profile_likelihood(
-    expectation, bkg_workspace_file, workspace_dir, data_file,
-    r_lo=0, r_hi=20, n_points=50):
-    # create_combine_workspace(workspace_dir, n_components, 3500, 50, expectation)
-    os.makedirs(workspace_dir, exist_ok=True)
-
-    create_signal_workspace(3500, 50, expectation=expectation, workspace_dir=workspace_dir)
-
-    os.system(f"cp {bkg_workspace_file} {workspace_dir}/workspace_bkg.root")
-    os.system(f"cp {data_file} {workspace_dir}/data_ws.root")
-
-    create_datacard(workspace_dir, data_file="data_ws.root", data_workspace="data_ws")
-
-    combine.run_combine(
-        "datacard.txt", "MultiDimFit", workspace_dir, 
-        extra_args=" ".join([
-            "-m 125",
-            "-n .scan",
-            "--algo grid",
-            f"--points {n_points}",
-            f"--setParameterRanges r={r_lo},{r_hi}",
-        ])
-    )
-
-    # plot_script = f"{combine.combine_release_dir}/src/HiggsAnalysis/CombinedLimit/test/plot1DScan.py"
-    multi_dim_fit_file = "higgsCombine.scan.MultiDimFit.mH125.root"
-    command = f"cd {workspace_dir} && plot1DScan.py {multi_dim_fit_file} -o scan"
-    os.system(command)
-
-def create_datacard(
-        workspace_dir,
-        data_file="workspace_bkg.root",
-        data_workspace="workspace_bkg",
-        expectSignal=10,
-        signal_mass=None,
-        ):
-    
-    if signal_mass is not None:
-        expectSignal = expect_signal(signal_mass)
-
-    datacard = textwrap.dedent(f"""
-        ---------------------------------------------
-        imax 1
-        jmax 1
-        kmax *
-        ---------------------------------------------
-        shapes      sig           SR      workspace_sig.root      workspace_sig:model_sig
-        shapes      bkg           SR      workspace_bkg.root      workspace_bkg:model_bkg
-        shapes      data_obs      SR      workspace_data.root      workspace_data:data
-        ---------------------------------------------
-        bin             SR
-        observation     -1
-        ---------------------------------------------
-        bin             SR           SR
-        process         sig          bkg
-        process         0            1
-        rate            {expectSignal}       1.0
-        ---------------------------------------------
-        lumi_13TeV lnN  1.025        -
-        ----------------------------------------------
-        sig_mean_nuisance param 0 1
-        sig_sigma_nuisance param 0 1
-        ----------------------------------------------
-        """)
-
-    with open(f"{workspace_dir}/datacard.txt", "w") as f:
-        f.write(datacard)
-    # print(f"Created datacard {workspace_dir}/datacard.txt")
-
-def get_data_workspace(workspace_dir=workspace_cache):
-
-    data_workspace_cache = f"{workspace_cache}/workspace_data.root"
-    if os.path.exists(data_workspace_cache):
-        if workspace_dir is not None:
-            os.makedirs(workspace_dir, exist_ok=True)
-            os.system(f"cp {data_workspace_cache} {workspace_dir}/workspace_data.root")
-            print(f"Copied data workspace to {workspace_dir}/.")
-        f = ROOT.TFile(data_workspace_cache, "READ")
-        ws = f.Get("workspace_data")
-        f.Close()
-        return ws
-
-    os.makedirs(workspace_dir, exist_ok=True)
-    
-    data_tree = get_data(tree=True)
-    x = ROOT.RooRealVar("x", "Diphoton Mass [GeV]", 500, 10_000)
-    data = ROOT.RooDataSet(
-        "data", "data",
-        data_tree,
-        ROOT.RooArgSet(x),
-    )
-    
-    ws = ROOT.RooWorkspace("workspace_data", "Workspace for data")
-    getattr(ws, 'import')(data)
-    # ws.SaveAs(f"{workspace_dir}/data_ws.root")
-    ws.SaveAs(data_workspace_cache)
-
-    os.system(f"cp {data_workspace_cache} {workspace_dir}/workspace_data.root")
-    print(f"Created data workspace at {workspace_dir}/workspace_data.root")
-    return ws
-
-def get_background_workspace(
-        workspace_dir,
-        n_components,
-        data=None,
-        x=None,
-    ):
-
-    assert (data is None and x is None) or (data is not None and x is not None), "Either both data and x must be provided, or neither."
-
-    if data is None:
-        data_ws = get_data_workspace(workspace_dir)
-        data = data_ws.data("data")
-        x = data_ws.var("x")
-
-    # Initialize model
-    model = ExponentialMixtureModel(x, n_components)
-    model.pdf.fitTo(data)
-    model.pdf.SetName("model_bkg")
-
-    # Create background normalization object
-    norm = ROOT.RooRealVar(
-        "model_bkg_norm", "Background normalization",
-        data.numEntries(), 0, 3*data.numEntries()
-    )
-
-    # Create workspace and import model and data
-    ws = ROOT.RooWorkspace("workspace_bkg", "Workspace for background model")
-    getattr(ws, 'import')(data)
-    getattr(ws, 'import')(norm)
-    getattr(ws, 'import')(model.pdf)
-    ws.SaveAs(f"{workspace_dir}/workspace_bkg.root")
-
-    return ws
-
-def get_signal_workspace(workspace_dir: str, mean: float, sigma: float, expectation=0.0003):
-    x = ROOT.RooRealVar("x", "Diphoton Mass [GeV]", 500, 4000)
-
-    mean_nominal = ROOT.RooRealVar("sig_mean_nominal", "Nominal signal mean", mean)
-    mean_nominal.setConstant(True)
-    sigma_nominal = ROOT.RooRealVar("sig_sigma_nominal", "Nominal signal sigma", sigma)
-    sigma_nominal.setConstant(True)
-
-    mean_nuisance = ROOT.RooRealVar("sig_mean_nuisance", "Signal mean nuisance", 0, -5, 5)
-    sigma_nuisance = ROOT.RooRealVar("sig_sigma_nuisance", "Signal sigma nuisance", 0, -5, 5)
-
-    mean = ROOT.RooFormulaVar(
-        "sig_mean",
-        "Signal mean with nuisance",
-        "sig_mean_nominal*(1 + 0.001*sig_mean_nuisance)",
-        ROOT.RooArgList(mean_nominal, mean_nuisance)
-    )
-    sigma = ROOT.RooFormulaVar(
-        "sig_sigma",
-        "Signal sigma with nuisance",
-        "sig_sigma_nominal*(1 + 0.01*sig_sigma_nuisance)",
-        ROOT.RooArgList(sigma_nominal, sigma_nuisance)
-    )
-
-    signal_pdf = ROOT.RooGaussian("model_sig", "Gaussian Signal PDF", x, mean, sigma)
-
-    # norm = ROOT.RooRealVar("model_sig_norm", "Signal normalization", expectation) # TODO this might need to be mrore complicated
-
-    ws = ROOT.RooWorkspace("workspace_sig", "Workspace for signal model")
-    getattr(ws, 'import')(signal_pdf)
-    ws.SaveAs(f"{workspace_dir}/workspace_sig.root")
-    return ws
-
-def setup_workspace(
-        workspace_dir,
-        n_components,
-        signal_point,
-        remake=False
-        ):
-
-    if os.path.exists(f"{workspace_dir}/datacard.txt") and remake:
-        os.system(f"rm -rf {workspace_dir}")
-
-    os.makedirs(workspace_dir, exist_ok=True)
-    
-    data_ws = get_data_workspace(workspace_dir)
-    bkg_ws = get_background_workspace(workspace_dir, n_components)
-    signal_ws = get_signal_workspace(workspace_dir, mean=signal_point[0], sigma=signal_point[1])
-    create_datacard(workspace_dir)
-
-def run_significance(workspace_dir, n_components, signal_point, remake=False):
-
-    setup_workspace(workspace_dir, n_components, signal_point, remake=remake)
-    combine.run_combine("datacard.txt", "FitDiagnostics", workspace_dir, extra_args="--plots")
-    combine.run_combine("datacard.txt", "Significance", workspace_dir, extra_args="-v 2")
-
-def run_combine_profile_likelihood_comparison(
-    workspace_base,
-    workspace_paths,
-    signal_workspace_file,
-    background_workspace_files,
-    data_file,
-    signal_mass,
-):
-    multi_dim_fit_file = lambda p: f"{p}/higgsCombine.scan.MultiDimFit.mH125.root"
-
-    for workspace_path, background_workspace_file in zip(workspace_paths, background_workspace_files):
-        if os.path.exists(multi_dim_fit_file(workspace_path)):
-            print(f"Skipping existing workspace at {workspace_path}")
-            continue
-        os.makedirs(workspace_path, exist_ok=True)
-        os.system(f"cp {signal_workspace_file} {workspace_path}/workspace_sig.root")
-        os.system(f"cp {background_workspace_file} {workspace_path}/workspace_bkg.root")
-        os.system(f"cp {data_file} {workspace_path}/data_ws.root")
-        create_datacard(workspace_path, data_file="data_ws.root", data_workspace="data_ws", signal_mass=signal_mass)
-        combine.run_combine(
-            "datacard.txt", "MultiDimFit", workspace_path, 
-            extra_args=" ".join([
-                "-m 125",
-                "-n .scan",
-                "--algo grid",
-                "--points 50",
-                "--setParameterRanges r=0,20",
-                # "--pointsRandProf 20",
-                "-v 2",
-            ])
-        )
-    
-    scan_command = f'plot1DScan.py -o scan {workspace_paths[0]}/higgsCombine.scan.MultiDimFit.mH125.root --main-label "{os.path.basename(workspace_paths[0])}" --main-color 1 --others '
-    others = [f'{multi_dim_fit_file(p)}:"{os.path.basename(p)}":{i+2}' for i, p in enumerate(workspace_paths[1:])]
-    scan_command += " ".join(others)
-    
-    combine.run_in_cmssw(workspace_base, scan_command)
-
-def expect_signal(mass):
-    # Approximately a 2 sigma significance
-    if mass < 550:
-        return 100
-    elif mass < 750:
-        return 90
-    elif mass < 850:
-        return 60
-    elif mass < 1100:
-        return 30
-    elif mass < 1400:
-        return 20
-    elif mass < 1550:
-        return 10
-    elif mass < 2050:
-        return 8
-    elif mass < 2600:
-        return 3
-    elif mass < 3300:
-        return 2
-    else:
-        return 1

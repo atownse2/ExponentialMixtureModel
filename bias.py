@@ -150,114 +150,202 @@ def load_results_CV(toy_model, seeds, n_toys_per_seed, n_folds):
 # line_styles = ['solid', 'dashed', 'dotted', 'dashdot']
 line_styles = ['solid']
 
-def plot_bias(
-    x, toy_model, fit_results, x_vals,
-    ax=None,
-    abs_bias=False,
-    n_cores=16,
-    range=None,
-    models_to_skip=None
-    ):
-    
+def _compute_bias_summary(x, toy_model, fit_results, x_vals, x_range=None):
     true_vals = emm.evaluate_pdf(x, toy_model, x_vals)
     model_vals = {model_name: [] for model_name in list(fit_results.keys())}
     for model_name, model_fit_results in fit_results.items():
-        for i_dataset, fit_result in model_fit_results.items():
+        for _, fit_result in model_fit_results.items():
             model_vals[model_name].append(fit_result["predictions"])
 
-    # Convert lists to arrays
     for model_name in model_vals:
         model_vals[model_name] = np.array(model_vals[model_name])
-    
-    if range is not None:
-        mask = (x_vals >= range[0]) & (x_vals <= range[1])
+
+    if x_range is not None:
+        mask = (x_vals >= x_range[0]) & (x_vals <= x_range[1])
         x_vals = x_vals[mask]
         true_vals = true_vals[mask]
         for model_name in model_vals:
             model_vals[model_name] = model_vals[model_name][:, mask]
 
-    # fn = lambda val: 100*abs(val - true_vals)/true_vals
-    fn = lambda val: (val- true_vals)
-
-    # if abs_bias:
-    #     bias_fn = lambda val: 100*abs(val - true_vals)/true_vals
-    #     ylabel = f"% Absolute Deviation"
-    # else:
-    #     bias_fn = lambda val: 100*(val - true_vals)/true_vals
-    #     ylabel = f"% Deviation"
-
     model_mean = {}
     model_std = {}
+    for model_name, vals in model_vals.items():
+        model_mean[model_name] = np.mean(vals, axis=0)
+        model_std[model_name] = np.std(vals, axis=0)
 
-    for model_name, model_vals in model_vals.items():
-        # low, med, hi = np.percentile(model_vals, [2.5, 50, 97.5], axis=0)
-        model_mean[model_name] = np.mean(model_vals, axis=0)
-        model_std[model_name] = np.std(model_vals, axis=0)
+    return x_vals, true_vals, model_mean, model_std
 
-    # Use the standard deviation of the true model for normalization
-    fn = lambda val: (val-true_vals)/model_std[toy_model.name]
-    fn_label = "Bias (D)"
 
-    # Relative deviation
-    # fn = lambda val: 100*(val - true_vals)/true_vals
-    # fn_label = "Relative Deviation [%]"
+def _plot_bias_single_axis(
+    x,
+    ax,
+    toy_model,
+    fit_results,
+    x_vals,
+    abs_bias=False,
+    x_range=None,
+    models_to_skip=None,
+    linewidth=3.5,
+    fontsize=18,
+    labelsize=16,
+):
+    x_vals, true_vals, model_mean, model_std = _compute_bias_summary(
+        x, toy_model, fit_results, x_vals, x_range=x_range
+    )
 
-    # model_avg_vals = {name: np.mean(vals, axis=0) for name, vals in model_vals.items()}
-    
-    # model_bias = {name: 100*(model_avg_vals[name] - true_vals)/true_vals for name in model_avg_vals}
+    denom = model_std.get(toy_model.name)
+    if denom is None:
+        raise ValueError(f"Toy model {toy_model.name} missing from fit_results keys")
+    denom = np.where(denom == 0, np.nan, denom)
+    fn = lambda val: (val - true_vals) / denom
+
     colors = ['#377eb8', '#ff7f00', '#4daf4a',
-                '#f781bf', '#984ea3', '#a65628',
-                '#999999', '#e41a1c', '#dede00']
-
+              '#f781bf', '#984ea3', '#a65628',
+              '#999999', '#e41a1c', '#dede00']
     line_styles = ['solid', 'dashed', 'dotted', 'dashdot']
 
-    if ax is None:
-        fig, ax = plt.subplots(figsize=(10, 6))
     for i, model_name in enumerate(model_mean.keys()):
         if models_to_skip is not None and model_name in models_to_skip:
             continue
-        label = model_name
+
+        label = model_name if "ExponentialMixture" in model_name else f"${model_name}$"
         line_style = line_styles[0]
         alpha = 0.3
-        if "ExponentialMixture" not in model_name:
-            label = f"${model_name}$"
 
         if model_name == toy_model.name:
-            label += " (true model)"
-            line_style = line_styles[0]
             alpha = 1.0
-            
         if "ExponentialMixture" in model_name:
             alpha = 1.0
-            if "AIC" in model_name:
-                line_style = line_styles[1]
-            else:
-                line_style = line_styles[2]
+            line_style = line_styles[1] if "AIC" in model_name else line_styles[2]
+
         ax.plot(
-            x_vals, fn(model_mean[model_name]),
+            x_vals,
+            fn(model_mean[model_name]),
             label=label,
-            color=colors[i],
-            # linestyle=line_styles[i % len(line_styles)],
+            color=colors[i % len(colors)],
             linestyle=line_style,
-            linewidth=2.5,
-                alpha=alpha,
-                
+            linewidth=linewidth,
+            alpha=alpha,
         )
-        if model_name == toy_model.name:# or model_name.startswith("ExponentialMixture"):
+
+        if model_name == toy_model.name:
             ax.fill_between(
                 x_vals,
                 fn(model_mean[model_name] - model_std[model_name]),
                 fn(model_mean[model_name] + model_std[model_name]),
-                alpha=0.3, color=colors[i], )
+                alpha=0.4,
+                color=colors[i % len(colors)],
+            )
 
     if abs_bias:
         ax.set_yscale("log")
     else:
-        ax.axhline(0, color='black', linestyle='--')
-    ax.set_xlabel("x")
-    # ax.set_ylabel(f"Relative Deviation")
-    ax.set_ylabel(fn_label)
-    ax.legend()
+        ax.axhline(0, color='black', linestyle='--', linewidth=linewidth, alpha=0.7)
+    ax.set_ylabel("Relative Bias (B)", fontsize=fontsize)
+    # Make the y-tick labels larger
+    ax.tick_params(axis='y', labelsize=labelsize)
+
+
+def plot_bias(
+    x,
+    toy_models,
+    fit_results,
+    x_vals,
+    ax=None,
+    abs_bias=False,
+    n_cores=16,
+    range=None,
+    models_to_skip=None,
+    linewidth=3.5,
+    legend_loc=(0.25, 0),
+    labelsize=16,
+    fontsize=18,
+):
+    # Backward compatible path: a single toy model + fit results for just that model.
+    if isinstance(toy_models, (list, tuple)):
+        toy_model_list = list(toy_models)
+        fit_results_by_toy = fit_results
+    else:
+        toy_model_list = [toy_models]
+        if toy_models.name in fit_results and isinstance(fit_results[toy_models.name], dict):
+            fit_results_by_toy = {toy_models.name: fit_results[toy_models.name]}
+        else:
+            fit_results_by_toy = {toy_models.name: fit_results}
+
+    if ax is None:
+        fig, axs = plt.subplots(
+            len(toy_model_list),
+            1,
+            figsize=(15, 4 * len(toy_model_list)),
+            sharex=True,
+            gridspec_kw={'hspace': 0},
+        )
+    else:
+        axs = ax
+
+    if len(toy_model_list) == 1:
+        axs = [axs]
+
+    colors = ['#377eb8', '#ff7f00', '#4daf4a',
+              '#f781bf', '#984ea3', '#a65628',
+              '#999999', '#e41a1c', '#dede00']
+
+    for i, toy_model in enumerate(toy_model_list):
+        axis = axs[i]
+        axis.text(
+            0.8,
+            0.9,
+            f"Truth Model: ${toy_model.name}$",
+            transform=axis.transAxes,
+            fontsize=fontsize,
+            verticalalignment='top',
+            horizontalalignment='right',
+            color=colors[i % len(colors)],
+        )
+
+        if toy_model.name not in fit_results_by_toy:
+            print(f"Toy model {toy_model.name} not found in fit results. Skipping.")
+            continue
+
+        _plot_bias_single_axis(
+            x,
+            axis,
+            toy_model,
+            fit_results_by_toy[toy_model.name],
+            x_vals,
+            abs_bias=abs_bias,
+            x_range=range,
+            models_to_skip=models_to_skip,
+            linewidth=linewidth,
+            fontsize=fontsize,
+            labelsize=labelsize,
+        )
+
+    handles, labels = axs[0].get_legend_handles_labels()
+    f_models = [h for h, l in zip(handles, labels) if l.startswith('$f_')]
+    exp_models = [h for h, l in zip(handles, labels) if 'Exponential' in l]
+    all_handles = f_models + exp_models
+    all_labels = [l for _, l in zip(handles, labels) if l.startswith('$f_') or 'Exponential' in l]
+
+    legend = axs[0].legend(
+        all_handles,
+        all_labels,
+        framealpha=0,
+        loc=legend_loc,
+        fontsize=fontsize,
+        ncol=2,
+    )
+    for line in legend.get_lines():
+        line.set_alpha(1.0)
+
+    if len(toy_model_list) > 1:
+        axs[-1].set_xlabel("$m_{\\gamma\\gamma}$ [GeV]", fontsize=fontsize)
+        axs[-1].tick_params(axis='x', labelsize=labelsize)
+    else:
+        axs[0].set_xlabel("$m_{\\gamma\\gamma}$ [GeV]", fontsize=fontsize)
+        axs[0].tick_params(axis='x', labelsize=labelsize)
+
+    return axs
 
 
 
@@ -315,6 +403,7 @@ def fit_signal_models(x_orig, toy_model, model_primitives, seed, n_toys, n, grid
                 # Save relevant info
                 fit_result = {
                     "n_sig": model.n_sig.getVal(),
+                    "n_sig_err": model.n_sig.getError(),
                     # "n_bkg": model.n_bkg.getVal(),
                     "bkg_model_nll": bkg_fit_results[-1]["nll"],
                     "sig_plus_bkg_nll": result.minNll(),

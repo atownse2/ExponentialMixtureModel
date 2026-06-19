@@ -356,6 +356,9 @@ def plot_coverages(
         models_to_skip=None,
         range: tuple = None,
         skip_every: int = 1,
+        linewidth=3.5,
+        labelsize=16,
+        fontsize=18,
     ):
 
     if range is not None:
@@ -379,15 +382,20 @@ def plot_coverages(
     
     line_styles = ["solid", "dashed", "dotted", "dashdot"]
 
-    legend_locs = {
-        0: "best",
-        1: (0.5, 0),
-        2: (0.5, 0),
-        3: (0.5, 0),
-    }
-
     for i, (toy_model_name, test_model_dict) in enumerate(coverages.items()):
         ax = axs[i] if len(coverages) > 1 else axs
+
+        # Print the true model name in the top left corner of the plot
+        ax.text(
+            0.01, 0.97,
+            f"Truth Model: ${toy_model_name}$",
+            transform=ax.transAxes,
+            fontsize=fontsize,
+            verticalalignment='top',
+            color=colors[i % len(colors)],
+            alpha=1,
+        )
+
         for j, (test_model_name, coverage) in enumerate(test_model_dict.items()):
             if models_to_skip is not None and test_model_name in models_to_skip:
                 continue
@@ -397,7 +405,7 @@ def plot_coverages(
             if "_" in label:
                 label = f"${label}$"
             if test_model_name == toy_model_name:
-                label += " (true model)"
+                # label += " (true model)"
                 alpha_line = 1.0
             if "Exponential Mixture" in test_model_name:
                 alpha_line = 1.0
@@ -412,17 +420,46 @@ def plot_coverages(
                 color=colors[j % len(colors)],
                 linestyle=line_style,
                 alpha=alpha_line,
-                linewidth=2.5,
+                linewidth=linewidth,
                 )
-        ax.axhline(100*(1 - alpha), color='k', linestyle='--', label=f"{100*(1 - alpha):.1f}% Coverage", alpha=1)
+        ax.axhline(
+            100*(1 - alpha),
+            color='k',
+            linestyle='--',
+            alpha=0.75,
+            linewidth=linewidth
+        )
         # ax.set_ylabel(f"Coverage for {toy_model_name} truth")
-        ax.set_ylabel("Coverage (C) [%]")
+        ax.set_ylabel("Coverage (C) [%]", fontsize=fontsize)
+        # Make the y-tick labels larger
+        ax.tick_params(axis='y', labelsize=labelsize)
+
         ax.set_ylim(100*y_min, 100)
-        ax.legend(framealpha=0, loc=legend_locs[i])
+        if i == 0:
+            # Customize legend: organize f_1-f_4 in 2x2 grid, then exponential mixtures
+            handles, labels = ax.get_legend_handles_labels()
+            f_models = [h for h, l in zip(handles, labels) if l.startswith('$f_')]
+            exp_models = [h for h, l in zip(handles, labels) if 'Exponential' in l]
+            
+            # Create custom legend with f_1-f_4 in 2x2 grid, then exponential mixtures
+            all_handles = f_models + exp_models
+            all_labels = [l for h, l in zip(handles, labels) if l.startswith('$f_') or 'Exponential' in l]
+            
+            legend = ax.legend(
+                all_handles, all_labels,
+                framealpha=0, 
+                loc=(0.2, 0),
+                fontsize=fontsize,
+                ncol=2  # Use 2 columns for compact layout
+            )
+            # Set legend line alpha to 1 (full opacity) for legend display only
+            for line in legend.get_lines():
+                line.set_alpha(1.0)
 
         # Remove 1.0 from yticks so it doesn't overlap with the other plot
         yticks = ax.get_yticks().tolist()
         yticks = yticks[1:-1]
         ax.set_yticks(yticks)
     
-    axs[-1].set_xlabel("$m_{\gamma\gamma}$ [GeV]")
+    axs[-1].set_xlabel("$m_{\gamma\gamma}$ [GeV]", fontsize=fontsize)
+    axs[-1].tick_params(axis='x', labelsize=labelsize)
