@@ -320,6 +320,8 @@ class MixtureModel(RooFitModel):
 class ExponentialMixtureModel(MixtureModel):
     rate_max = 50
 
+    default_par_specs = {}
+
     def randomize_params(self, custom_ranges = {}, rng=np.random.default_rng()):
         if custom_ranges == {}:
 

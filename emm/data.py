@@ -1,3 +1,4 @@
+import os
 import ROOT
 import numpy as np
 from array import array
@@ -9,44 +10,20 @@ top_dir = storage.top_dir
 cache_dir = f"{top_dir}/cache"
 data_dir = f"{top_dir}/data/high_mass_diphoton"
 
-def get_diphoton_data(normalize=False, sort_and_index=False, tree=False):
-
-    triggers = {
-        "2016": "HLT_DoublePhoton60",
-        "2017": "HLT_DoublePhoton70",
-        "2018": "HLT_DoublePhoton70",
-    }
+def get_diphoton_data(tree=False):
+    npy_file = f"{data_dir}/diphoton_data.npy"
     
-    # Get list of diphoton invariant masses
-    mgg = []
-    for year in triggers.keys():
-        d = ROOT.RDataFrame(
-            "diphoton/fTree",  # Name of the tree in the file
-            f"{data_dir}/Data{year}/Run{year}*.root"
-        )
+    # Load the npy file if it exists
+    if not os.path.exists(npy_file):
+        raise FileNotFoundError(f"{npy_file} does not exist.")
 
-        # Apply selections
-        isGood = d.Filter("isGood == 1")
-        pass_trig = isGood.Filter(f"TriggerBit.{triggers[year]} == 1 | TriggerBit.HLT_ECALHT800 == 1")
-        pass_kin = pass_trig.Filter("Diphoton.Minv > 500 && Diphoton.deltaR > 0.45 && Photon1.pt > 125 && Photon2.pt > 125 && Diphoton.isEBEB")
-
-        # Get the invariant mass of the diphoton system and append to the list
-        mgg.extend(list(pass_kin.AsNumpy(["Diphoton.Minv"])['Diphoton.Minv']))
-
-    if normalize:
-        mgg = (np.array(mgg) - np.min(mgg)) / np.mean(mgg)
+    mgg = np.load(npy_file)
+    if tree:
+        t_mgg = root_tools.to_root_tree([mgg], "mgg", ["x"], index=True)
+        return t_mgg
     
-    if not tree:
-        mgg = np.array(mgg)
-        return mgg
-    print(f"Loaded {len(mgg)} diphoton invariant masses from data.")
-    if sort_and_index:
-        mgg = np.sort(mgg)
-        t_mgg = root_tools.to_root_tree([mgg], "mgg", ["x"], index=True)
-    else:
-        t_mgg = root_tools.to_root_tree([mgg], "mgg", ["x"], index=True)
+    return mgg
 
-    return t_mgg
 
 def get_diphoton_binning():
     # Get fine histogram
