@@ -1,0 +1,471 @@
+dependent_variables:
+- header: {name: high mass q*}
+  qualifiers:
+  - {name: Number of Events, value: Observed}
+  - {name: SQRT(S), units: TeV, value: 13}
+  - {name: LUMINOSITY, units: 'fb$^{-1}$', value: 139}
+  values:
+  - {value: 4.05992e+06}
+  - {value: 3.41404e+06}
+  - {value: 2.96112e+06}
+  - {value: 2.49197e+06}
+  - {value: 2.16715e+06}
+  - {value: 1.87816e+06}
+  - {value: 1.58675e+06}
+  - {value: 1.38292e+06}
+  - {value: 1.1985e+06}
+  - {value: 1.01152e+06}
+  - {value: 882277}
+  - {value: 765938}
+  - {value: 650196}
+  - {value: 566136}
+  - {value: 491385}
+  - {value: 416374}
+  - {value: 363507}
+  - {value: 315576}
+  - {value: 275559}
+  - {value: 232966}
+  - {value: 203122}
+  - {value: 176449}
+  - {value: 153790}
+  - {value: 132205}
+  - {value: 113633}
+  - {value: 98286}
+  - {value: 85408}
+  - {value: 74395}
+  - {value: 64567}
+  - {value: 56131}
+  - {value: 48396}
+  - {value: 41884}
+  - {value: 36479}
+  - {value: 31277}
+  - {value: 27066}
+  - {value: 23288}
+  - {value: 19818}
+  - {value: 17139}
+  - {value: 14911}
+  - {value: 12884}
+  - {value: 11031}
+  - {value: 9630}
+  - {value: 8169}
+  - {value: 6909}
+  - {value: 5920}
+  - {value: 5263}
+  - {value: 4330}
+  - {value: 3700}
+  - {value: 3236}
+  - {value: 2766}
+  - {value: 2369}
+  - {value: 2020}
+  - {value: 1787}
+  - {value: 1428}
+  - {value: 1250}
+  - {value: 1031}
+  - {value: 839}
+  - {value: 740}
+  - {value: 627}
+  - {value: 550}
+  - {value: 468}
+  - {value: 345}
+  - {value: 296}
+  - {value: 266}
+  - {value: 202}
+  - {value: 193}
+  - {value: 137}
+  - {value: 114}
+  - {value: 100}
+  - {value: 96}
+  - {value: 51}
+  - {value: 45}
+  - {value: 41}
+  - {value: 39}
+  - {value: 22}
+  - {value: 15}
+  - {value: 15}
+  - {value: 10}
+  - {value: 8}
+  - {value: 8}
+  - {value: 2}
+  - {value: 4}
+  - {value: 7}
+  - {value: 6}
+  - {value: 3}
+  - {value: 0}
+  - {value: 0}
+  - {value: 1}
+  - {value: 0}
+  - {value: 4}
+  - {value: 0}
+- header: {name: high mass q*}
+  qualifiers:
+  - {name: Number of Events, value: Fit}
+  - {name: SQRT(S), units: TeV, value: 13}
+  - {name: LUMINOSITY, units: 'fb$^{-1}$', value: 139}
+  values:
+  - value: 4.061156e+06
+    errors:
+    - {symerror: 2.015231e+03}
+  - value: 3.412394e+06
+    errors:
+    - {symerror: 1.847267e+03}
+  - value: 2.959049e+06
+    errors:
+    - {symerror: 1.720189e+03}
+  - value: 2.494038e+06
+    errors:
+    - {symerror: 1.579252e+03}
+  - value: 2.167283e+06
+    errors:
+    - {symerror: 1.472170e+03}
+  - value: 1.880003e+06
+    errors:
+    - {symerror: 1.371132e+03}
+  - value: 1.587727e+06
+    errors:
+    - {symerror: 1.260051e+03}
+  - value: 1.380208e+06
+    errors:
+    - {symerror: 1.174823e+03}
+  - value: 1.197923e+06
+    errors:
+    - {symerror: 1.094497e+03}
+  - value: 1.013723e+06
+    errors:
+    - {symerror: 1.006838e+03}
+  - value: 8.816902e+05
+    errors:
+    - {symerror: 9.389836e+02}
+  - value: 7.657652e+05
+    errors:
+    - {symerror: 8.750801e+02}
+  - value: 6.492943e+05
+    errors:
+    - {symerror: 8.057880e+02}
+  - value: 5.650751e+05
+    errors:
+    - {symerror: 7.517148e+02}
+  - value: 4.911407e+05
+    errors:
+    - {symerror: 7.008143e+02}
+  - value: 4.172269e+05
+    errors:
+    - {symerror: 6.459310e+02}
+  - value: 3.633449e+05
+    errors:
+    - {symerror: 6.027810e+02}
+  - value: 3.160397e+05
+    errors:
+    - {symerror: 5.621740e+02}
+  - value: 2.745835e+05
+    errors:
+    - {symerror: 5.240072e+02}
+  - value: 2.335367e+05
+    errors:
+    - {symerror: 4.832564e+02}
+  - value: 2.032888e+05
+    errors:
+    - {symerror: 4.508756e+02}
+  - value: 1.767693e+05
+    errors:
+    - {symerror: 4.204394e+02}
+  - value: 1.535544e+05
+    errors:
+    - {symerror: 3.918602e+02}
+  - value: 1.332614e+05
+    errors:
+    - {symerror: 3.650498e+02}
+  - value: 1.134146e+05
+    errors:
+    - {symerror: 3.367708e+02}
+  - value: 9.862259e+04
+    errors:
+    - {symerror: 3.140423e+02}
+  - value: 8.565729e+04
+    errors:
+    - {symerror: 2.926727e+02}
+  - value: 7.431091e+04
+    errors:
+    - {symerror: 2.726003e+02}
+  - value: 6.443852e+04
+    errors:
+    - {symerror: 2.538474e+02}
+  - value: 5.581647e+04
+    errors:
+    - {symerror: 2.362551e+02}
+  - value: 4.833952e+04
+    errors:
+    - {symerror: 2.198625e+02}
+  - value: 4.183361e+04
+    errors:
+    - {symerror: 2.045327e+02}
+  - value: 3.615245e+04
+    errors:
+    - {symerror: 1.901380e+02}
+  - value: 3.122970e+04
+    errors:
+    - {symerror: 1.767193e+02}
+  - value: 2.698151e+04
+    errors:
+    - {symerror: 1.642605e+02}
+  - value: 2.328260e+04
+    errors:
+    - {symerror: 1.525864e+02}
+  - value: 2.007914e+04
+    errors:
+    - {symerror: 1.417009e+02}
+  - value: 1.729803e+04
+    errors:
+    - {symerror: 1.315220e+02}
+  - value: 1.489241e+04
+    errors:
+    - {symerror: 1.220345e+02}
+  - value: 1.281227e+04
+    errors:
+    - {symerror: 1.131913e+02}
+  - value: 1.102142e+04
+    errors:
+    - {symerror: 1.049830e+02}
+  - value: 9.470961e+03
+    errors:
+    - {symerror: 9.731886e+01}
+  - value: 8.134509e+03
+    errors:
+    - {symerror: 9.019151e+01}
+  - value: 6.971712e+03
+    errors:
+    - {symerror: 8.349678e+01}
+  - value: 6.057752e+03
+    errors:
+    - {symerror: 7.783156e+01}
+  - value: 5.172972e+03
+    errors:
+    - {symerror: 7.192338e+01}
+  - value: 4.414431e+03
+    errors:
+    - {symerror: 6.644119e+01}
+  - value: 3.762189e+03
+    errors:
+    - {symerror: 6.133669e+01}
+  - value: 3.253277e+03
+    errors:
+    - {symerror: 5.703750e+01}
+  - value: 2.762029e+03
+    errors:
+    - {symerror: 5.255501e+01}
+  - value: 2.346261e+03
+    errors:
+    - {symerror: 4.843822e+01}
+  - value: 1.994510e+03
+    errors:
+    - {symerror: 4.465994e+01}
+  - value: 1.713327e+03
+    errors:
+    - {symerror: 4.139236e+01}
+  - value: 1.449924e+03
+    errors:
+    - {symerror: 3.807787e+01}
+  - value: 1.224743e+03
+    errors:
+    - {symerror: 3.499633e+01}
+  - value: 1.046231e+03
+    errors:
+    - {symerror: 3.234549e+01}
+  - value: 8.810709e+02
+    errors:
+    - {symerror: 2.968284e+01}
+  - value: 7.471206e+02
+    errors:
+    - {symerror: 2.733351e+01}
+  - value: 6.251894e+02
+    errors:
+    - {symerror: 2.500379e+01}
+  - value: 5.261701e+02
+    errors:
+    - {symerror: 2.293840e+01}
+  - value: 4.364793e+02
+    errors:
+    - {symerror: 2.089209e+01}
+  - value: 3.675131e+02
+    errors:
+    - {symerror: 1.917063e+01}
+  - value: 3.061698e+02
+    errors:
+    - {symerror: 1.749771e+01}
+  - value: 2.565135e+02
+    errors:
+    - {symerror: 1.601604e+01}
+  - value: 2.114898e+02
+    errors:
+    - {symerror: 1.454269e+01}
+  - value: 1.760344e+02
+    errors:
+    - {symerror: 1.326779e+01}
+  - value: 1.438581e+02
+    errors:
+    - {symerror: 1.199408e+01}
+  - value: 1.163921e+02
+    errors:
+    - {symerror: 1.078852e+01}
+  - value: 9.507912e+01
+    errors:
+    - {symerror: 9.750852e+00}
+  - value: 7.800240e+01
+    errors:
+    - {symerror: 8.831897e+00}
+  - value: 6.236522e+01
+    errors:
+    - {symerror: 7.897165e+00}
+  - value: 5.040056e+01
+    errors:
+    - {symerror: 7.099335e+00}
+  - value: 4.074647e+01
+    errors:
+    - {symerror: 6.383296e+00}
+  - value: 3.276244e+01
+    errors:
+    - {symerror: 5.723849e+00}
+  - value: 2.626634e+01
+    errors:
+    - {symerror: 5.125070e+00}
+  - value: 2.094402e+01
+    errors:
+    - {symerror: 4.576464e+00}
+  - value: 1.660636e+01
+    errors:
+    - {symerror: 4.075091e+00}
+  - value: 1.279239e+01
+    errors:
+    - {symerror: 3.576645e+00}
+  - value: 1.007148e+01
+    errors:
+    - {symerror: 3.173559e+00}
+  - value: 7.794771e+00
+    errors:
+    - {symerror: 2.791912e+00}
+  - value: 6.063833e+00
+    errors:
+    - {symerror: 2.462485e+00}
+  - value: 4.854197e+00
+    errors:
+    - {symerror: 2.203224e+00}
+  - value: 3.903903e+00
+    errors:
+    - {symerror: 1.975830e+00}
+  - value: 3.134968e+00
+    errors:
+    - {symerror: 1.770584e+00}
+  - value: 2.536585e+00
+    errors:
+    - {symerror: 1.592666e+00}
+  - value: 2.082287e+00
+    errors:
+    - {symerror: 1.443013e+00}
+  - value: 1.711891e+00
+    errors:
+    - {symerror: 1.308393e+00}
+  - value: 1.431811e+00
+    errors:
+    - {symerror: 1.196583e+00}
+  - value: 1.203575e+00
+    errors:
+    - {symerror: 1.097076e+00}
+  - value: 1.032728e+00
+    errors:
+    - {symerror: 1.016232e+00}
+  - value: 8.942993e-01
+    errors:
+    - {symerror: 9.456740e-01}
+independent_variables:
+- header: {name: '$m_{jj}$', units: GeV}
+  values:
+  - {high: 1133, low: 1100}
+  - {high: 1166, low: 1133}
+  - {high: 1200, low: 1166}
+  - {high: 1234, low: 1200}
+  - {high: 1269, low: 1234}
+  - {high: 1305, low: 1269}
+  - {high: 1341, low: 1305}
+  - {high: 1378, low: 1341}
+  - {high: 1416, low: 1378}
+  - {high: 1454, low: 1416}
+  - {high: 1493, low: 1454}
+  - {high: 1533, low: 1493}
+  - {high: 1573, low: 1533}
+  - {high: 1614, low: 1573}
+  - {high: 1656, low: 1614}
+  - {high: 1698, low: 1656}
+  - {high: 1741, low: 1698}
+  - {high: 1785, low: 1741}
+  - {high: 1830, low: 1785}
+  - {high: 1875, low: 1830}
+  - {high: 1921, low: 1875}
+  - {high: 1968, low: 1921}
+  - {high: 2016, low: 1968}
+  - {high: 2065, low: 2016}
+  - {high: 2114, low: 2065}
+  - {high: 2164, low: 2114}
+  - {high: 2215, low: 2164}
+  - {high: 2267, low: 2215}
+  - {high: 2320, low: 2267}
+  - {high: 2374, low: 2320}
+  - {high: 2429, low: 2374}
+  - {high: 2485, low: 2429}
+  - {high: 2542, low: 2485}
+  - {high: 2600, low: 2542}
+  - {high: 2659, low: 2600}
+  - {high: 2719, low: 2659}
+  - {high: 2780, low: 2719}
+  - {high: 2842, low: 2780}
+  - {high: 2905, low: 2842}
+  - {high: 2969, low: 2905}
+  - {high: 3034, low: 2969}
+  - {high: 3100, low: 3034}
+  - {high: 3167, low: 3100}
+  - {high: 3235, low: 3167}
+  - {high: 3305, low: 3235}
+  - {high: 3376, low: 3305}
+  - {high: 3448, low: 3376}
+  - {high: 3521, low: 3448}
+  - {high: 3596, low: 3521}
+  - {high: 3672, low: 3596}
+  - {high: 3749, low: 3672}
+  - {high: 3827, low: 3749}
+  - {high: 3907, low: 3827}
+  - {high: 3988, low: 3907}
+  - {high: 4070, low: 3988}
+  - {high: 4154, low: 4070}
+  - {high: 4239, low: 4154}
+  - {high: 4326, low: 4239}
+  - {high: 4414, low: 4326}
+  - {high: 4504, low: 4414}
+  - {high: 4595, low: 4504}
+  - {high: 4688, low: 4595}
+  - {high: 4782, low: 4688}
+  - {high: 4878, low: 4782}
+  - {high: 4975, low: 4878}
+  - {high: 5074, low: 4975}
+  - {high: 5175, low: 5074}
+  - {high: 5277, low: 5175}
+  - {high: 5381, low: 5277}
+  - {high: 5487, low: 5381}
+  - {high: 5595, low: 5487}
+  - {high: 5705, low: 5595}
+  - {high: 5817, low: 5705}
+  - {high: 5931, low: 5817}
+  - {high: 6047, low: 5931}
+  - {high: 6165, low: 6047}
+  - {high: 6285, low: 6165}
+  - {high: 6407, low: 6285}
+  - {high: 6531, low: 6407}
+  - {high: 6658, low: 6531}
+  - {high: 6787, low: 6658}
+  - {high: 6918, low: 6787}
+  - {high: 7052, low: 6918}
+  - {high: 7188, low: 7052}
+  - {high: 7326, low: 7188}
+  - {high: 7467, low: 7326}
+  - {high: 7610, low: 7467}
+  - {high: 7756, low: 7610}
+  - {high: 7904, low: 7756}
+  - {high: 8055, low: 7904}
+  - {high: 8208, low: 8055}

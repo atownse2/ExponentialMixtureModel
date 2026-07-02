@@ -7,22 +7,28 @@ import numpy as np
 
 import matplotlib.pyplot as plt
 
-import emm
-import model_selection as ms
+from .models import (
+    evaluate_pdf,
+    GaussianSignalModel,
+    SignalPlusBackgroundModel,
+)
+from .fitting import fit_random_restarts, fit_n_times, train_test_split
 
 from tools import storage
 from tools import scale_out as so
 
+# Bias studies
 bias_cache = storage.ensure_cache("bias")
-def bias_fits_filename(toy_model, seed, n_toys):
+def get_bias_fits_cache_path(toy_model, seed, n_toys):
     return f"{bias_cache}/{toy_model.name}_seed{seed}_{n_toys}toys.pkl"
 
-def fit_models(x, toy_model, model_primitives, seed, n_toys, n, grid) -> list[dict]:
+def run_bias_fits(x, toy_model, model_primitives, seed, n_toys, n, grid) -> list[dict]:
 
     # Set seed
     ROOT.RooRandom.randomGenerator().SetSeed(int(seed))
 
-    all_fit_results = {model.name: {} for model in model_primitives}
+    model_names = [mp.name for mp in model_primitives]
+    all_fit_results = {model_name: {} for model_name in model_names}
     for itoy in range(n_toys):
         # Generate toy data
         toy_data = toy_model.pdf.generate(ROOT.RooArgSet(x), n)
@@ -30,128 +36,181 @@ def fit_models(x, toy_model, model_primitives, seed, n_toys, n, grid) -> list[di
         # Fit models to toy data
         for model_primitive in model_primitives:
             model = model_primitive(x)
-            # fit_result = model.pdf.fitTo(toy_data, PrintLevel=-1, Save=True)
-            fit_results = emm.fit_random_restarts(
+            fit_result = fit_random_restarts(
                 x, toy_data, model_primitive,
                 seed, n_samples=20, n_retries=42,
                 save=False,
             )
 
             # Extract the best fit result and predictions
-            best_fit_result = fit_results[-1]
-            model = model_primitive(x)
-            model.set_params(best_fit_result["final_pars"])
-            best_fit_result["predictions"] = emm.evaluate_pdf(x, model, grid)
+            model = model_primitive(x) # Re-instantiate the model to avoid any side effects from previous fits
+            model.set_params(fit_result["final_pars"])
+            fit_result["predictions"] = evaluate_pdf(x, model, grid)
             #
 
-            all_fit_results[model.name][itoy] = best_fit_result
+            all_fit_results[model.name][itoy] = fit_result
 
     # Save result to cache
-    cache_file = bias_fits_filename(toy_model, seed, n_toys)
+    cache_file = get_bias_fits_cache_path(toy_model, seed, n_toys)
     with open(cache_file, "wb") as f:
         pickle.dump(all_fit_results, f)
     return all_fit_results
 
-def load_results(toy_model, seeds, n_toys_per_seed):
-    results = {}
-    for seed in seeds:
-        cache_file = bias_fits_filename(toy_model, seed, n_toys_per_seed)
-        if not os.path.exists(cache_file):
-            print(f"Cache file {cache_file} does not exist. Skipping.")
+def load_and_format_bias_results(
+    toy_model_name,
+    cache_file,
+    n_events=None,
+    model_selection=True,
+):
+
+    if model_selection and n_events is None:
+        raise ValueError("n_events must be provided when model_selection is True.")
+
+    seed = os.path.basename(cache_file).split("_seed", maxsplit=1)[1].split("_", maxsplit=1)[0]
+
+    with open(cache_file, "rb") as f:
+        result = pickle.load(f)
+
+    fit_results = {}
+    for model_name, model_fit_results in result.items():
+        if model_selection and "ExponentialMixture" in model_name:
             continue
-        with open(cache_file, "rb") as f:
-            result = pickle.load(f)
-        for model_name, fit_results in result.items():
-            if model_name not in results:
-                results[model_name] = {}
-            for i_dataset, dataset_results in fit_results.items():
-                uid = f"{seed}_{i_dataset}"
-                results[model_name][uid] = dataset_results
-    return results
+        fit_results[model_name] = {
+            f"{seed}_{i_dataset}": dataset_results
+            for i_dataset, dataset_results in model_fit_results.items()
+        }
 
-def evaluate_model(x, model, params, x_vals):
-    model = model(x)
-    model.set_params(params)
-    return model.name, emm.evaluate_pdf(x, model, x_vals)
+    if model_selection:
+        exponential_mixture_results = {
+            model_name: model_fit_results
+            for model_name, model_fit_results in result.items()
+            if "ExponentialMixture" in model_name
+        }
+        if len(exponential_mixture_results) > 0:
+            fit_results["ExponentialMixture (AIC)"] = {}
+            fit_results["ExponentialMixture (BIC)"] = {}
+            dataset_ids = sorted(
+                {
+                    i_dataset
+                    for model_fit_results in exponential_mixture_results.values()
+                    for i_dataset in model_fit_results
+                }
+            )
+            for i_dataset in dataset_ids:
+                best_AIC = np.inf
+                best_BIC = np.inf
+                for model_name, model_fit_results in exponential_mixture_results.items():
+                    if i_dataset not in model_fit_results:
+                        continue
 
-def bias_fits_CV_filename(toy_model, seed, n_toys, n_folds):
+                    fit_result = model_fit_results[i_dataset]
+                    k = int(model_name.split("-")[-1])
+                    n_params = 2 * k - 1
+                    aic = 2 * n_params + 2 * fit_result["nll"]
+                    bic = n_params * np.log(n_events) + 2 * fit_result["nll"]
+                    uid = f"{seed}_{i_dataset}"
+                    if aic < best_AIC:
+                        best_AIC = aic
+                        fit_results["ExponentialMixture (AIC)"][uid] = fit_result
+                    if bic < best_BIC:
+                        best_BIC = bic
+                        fit_results["ExponentialMixture (BIC)"][uid] = fit_result
+
+    return fit_results, toy_model_name
+
+
+def get_bias_results(
+    toy_models,
+    seeds,
+    n_toys_per_seed,
+    n_events,
+    model_selection=True,
+):
+
+    tasks = []
+    for toy_model in toy_models:
+        for seed in seeds:
+            cache_file = get_bias_fits_cache_path(toy_model, seed, n_toys_per_seed)
+            if not os.path.exists(cache_file):
+                continue
+            task = so.Task(
+                load_and_format_bias_results,
+                toy_model.name,
+                cache_file,
+                n_events=n_events,
+                model_selection=model_selection,
+            )
+            tasks.append(task)
+
+    results = so.run_tasks(tasks)
+    bias_results = {toy_model.name: {} for toy_model in toy_models}
+    for fit_results, toy_model_name in results:
+        for model_name, model_fit_results in fit_results.items():
+            if model_name not in bias_results[toy_model_name]:
+                bias_results[toy_model_name][model_name] = {}
+            bias_results[toy_model_name][model_name].update(model_fit_results)
+
+    return bias_results
+
+# Cross-validation tools
+def get_bias_fits_CV_cache_path(toy_model, seed, n_toys, n_folds):
     return f"{bias_cache}/{toy_model.name}_seed{seed}_{n_toys}toys_CV{n_folds}.pkl"
 
-def fit_models_CV(
+def run_bias_fits_CV(
         x, toy_model, model_primitives,
         seed, n_toys, n, grid, n_folds, CV_seed=42) -> list[dict]:
 
     # Set seed
     ROOT.RooRandom.randomGenerator().SetSeed(int(seed))
 
-    all_fit_results = {model.name: {} for model in model_primitives}
+    model_names = [mp.name for mp in model_primitives]
+    all_fit_results = {model_name: {} for model_name in model_names}
     for itoy in range(n_toys):
 
         # Generate toy data
         toy_data = toy_model.pdf.generate(ROOT.RooArgSet(x), n)
 
         # Do n_folds cross validation
-        train_datasets, test_datasets = ms.train_test_split(x, toy_data, n_folds, seed=CV_seed)
+        train_datasets, test_datasets = train_test_split(x, toy_data, n_folds, seed=CV_seed)
 
         # Fit models to toy data
         for model_primitive in model_primitives:
             model = model_primitive(x)
-            fit_results = emm.fit_random_restarts(
+            fit_result = fit_random_restarts(
                 x, toy_data, model_primitive,
                 seed, n_samples=8, n_retries=42,
                 save=False,
             )
 
             # Extract the best fit result and predictions
-            best_fit_result = fit_results[-1]
             model = model_primitive(x)
-            model.set_params(best_fit_result["final_pars"])
-            best_fit_result["predictions"] = emm.evaluate_pdf(x, model, grid)
+            model.set_params(fit_result["final_pars"])
+            fit_result["predictions"] = evaluate_pdf(x, model, grid)
             #
 
             # Get the CV log-likelihoods
             cv_nlls = []
             for i_fold, train_dataset, test_dataset in zip(range(n_folds), train_datasets, test_datasets):
-                cv_fit_results = emm.fit_random_restarts(
+                cv_fit_result = fit_random_restarts(
                     x, train_dataset, model_primitive,
                     seed, n_samples=20, n_retries=42,
                     save=False,
                 )
-                model.set_params(cv_fit_results[-1]["final_pars"])
+                model.set_params(cv_fit_result["final_pars"])
                 nll = model.pdf.createNLL(test_dataset)
                 cv_nlls.append(nll.getVal())
 
-            best_fit_result["cv_ll"] = -np.sum(cv_nlls)
-            all_fit_results[model.name][itoy] = best_fit_result
+            fit_result["cv_ll"] = -np.sum(cv_nlls)
+            all_fit_results[model.name][itoy] = fit_result
 
     # Save result to cache
-    cache_file = bias_fits_CV_filename(toy_model, seed, n_toys, n_folds)
+    cache_file = get_bias_fits_CV_cache_path(toy_model, seed, n_toys, n_folds)
     with open(cache_file, "wb") as f:
         pickle.dump(all_fit_results, f)
     return all_fit_results
 
-def load_results_CV(toy_model, seeds, n_toys_per_seed, n_folds):
-    results = {}
-    for seed in seeds:
-        cache_file = bias_fits_CV_filename(toy_model, seed, n_toys_per_seed, n_folds)
-        if not os.path.exists(cache_file):
-            print(f"Cache file {cache_file} does not exist. Skipping.")
-            continue
-        with open(cache_file, "rb") as f:
-            result = pickle.load(f)
-        for model_name, fit_results in result.items():
-            if model_name not in results:
-                results[model_name] = {}
-            for i_dataset, dataset_results in fit_results.items():
-                uid = f"{seed}_{i_dataset}"
-                results[model_name][uid] = dataset_results
-    return results
-
-# line_styles = ['solid', 'dashed', 'dotted', 'dashdot']
-line_styles = ['solid']
-
 def _compute_bias_summary(x, toy_model, fit_results, x_vals, x_range=None):
-    true_vals = emm.evaluate_pdf(x, toy_model, x_vals)
+    true_vals = evaluate_pdf(x, toy_model, x_vals)
     model_vals = {model_name: [] for model_name in list(fit_results.keys())}
     for model_name, model_fit_results in fit_results.items():
         for _, fit_result in model_fit_results.items():
@@ -175,7 +234,7 @@ def _compute_bias_summary(x, toy_model, fit_results, x_vals, x_range=None):
 
     return x_vals, true_vals, model_mean, model_std
 
-
+# Plotting utilities
 def _plot_bias_single_axis(
     x,
     ax,
@@ -244,7 +303,6 @@ def _plot_bias_single_axis(
     ax.set_ylabel("Relative Bias (B)", fontsize=fontsize)
     # Make the y-tick labels larger
     ax.tick_params(axis='y', labelsize=labelsize)
-
 
 def plot_bias(
     x,
@@ -347,14 +405,12 @@ def plot_bias(
 
     return axs
 
-
-
 # Spurious signal tests
 spurious_signal_cache = storage.ensure_cache("spurious_signal")
-def signal_fits_filename(toy_model, seed, n_toys):
+def get_spurious_signal_fits_cache_path(toy_model, seed, n_toys):
     return f"{spurious_signal_cache}/{toy_model.name}_seed{seed}_{n_toys}toys_signal_fits.pkl"
 
-def fit_signal_models(x_orig, toy_model, model_primitives, seed, n_toys, n, grid) -> list[dict]:
+def run_spurious_signal_fits(x_orig, toy_model, model_primitives, seed, n_toys, n, grid) -> list[dict]:
 
     # Set seed
     ROOT.RooRandom.randomGenerator().SetSeed(int(seed))
@@ -367,19 +423,19 @@ def fit_signal_models(x_orig, toy_model, model_primitives, seed, n_toys, n, grid
 
         for model_primitive in model_primitives:
             # Fit the background model first to stabilize the fit
-            bkg_fit_results = emm.fit_random_restarts(
+            bkg_fit_result = fit_random_restarts(
                 x, toy_data, model_primitive,
                 seed, n_samples=5, n_retries=5,
                 save=False,
             )
-            if bkg_fit_results is None:
+            if bkg_fit_result is None:
                 print(f"Background fit failed for toy {itoy}, model {model_primitive.name}. Skipping.")
                 continue
 
             for sp in grid:
                 sig_mean, sig_width = sp
                 bkg_model = model_primitive(x)
-                bkg_model.set_params(bkg_fit_results[-1]["final_pars"])
+                bkg_model.set_params(bkg_fit_result["final_pars"])
 
                 # Get the number of background events within 1 sigma of the signal mean
                 x.setRange("sig_range", sig_mean - sig_width, sig_mean + sig_width)
@@ -390,9 +446,9 @@ def fit_signal_models(x_orig, toy_model, model_primitives, seed, n_toys, n, grid
                 else:
                     max_sig = 10*np.sqrt(n_evt_in_sig_region)
 
-                sig_model = emm.GaussianSignalModel(x, sig_mean, sig_width)
-                model = emm.SignalPlusBackgroundModel(sig_model, bkg_model, max_sig=max_sig)
-                result = emm.fit_n_times(
+                sig_model = GaussianSignalModel(x, sig_mean, sig_width)
+                model = SignalPlusBackgroundModel(sig_model, bkg_model, max_sig=max_sig)
+                result = fit_n_times(
                     model, toy_data, n_attempts=5,
                     fit_options=[ROOT.RooFit.RecoverFromUndefinedRegions(1.0)]
                 )
@@ -402,10 +458,10 @@ def fit_signal_models(x_orig, toy_model, model_primitives, seed, n_toys, n, grid
 
                 # Save relevant info
                 fit_result = {
-                    "n_sig": model.n_sig.getVal(),
-                    "n_sig_err": model.n_sig.getError(),
+                    "n_sig": model.get_param("n_sig").getVal(),
+                    "n_sig_err": model.get_param("n_sig").getError(),
                     # "n_bkg": model.n_bkg.getVal(),
-                    "bkg_model_nll": bkg_fit_results[-1]["nll"],
+                    "bkg_model_nll": bkg_fit_result["nll"],
                     "sig_plus_bkg_nll": result.minNll(),
                 }
                 all_fit_results[itoy][sp][bkg_model.name] = fit_result
@@ -426,16 +482,16 @@ def fit_signal_models(x_orig, toy_model, model_primitives, seed, n_toys, n, grid
             gc.collect()
 
     # Save result to cache
-    cache_file = signal_fits_filename(toy_model, seed, n_toys)
+    cache_file = get_spurious_signal_fits_cache_path(toy_model, seed, n_toys)
     with open(cache_file, "wb") as f:
         pickle.dump(all_fit_results, f)
 
     return all_fit_results
 
-def load_signal_fit_results(toy_model, seeds, n_toys_per_seed):
+def load_spurious_signal_fit_results(toy_model, seeds, n_toys_per_seed):
     results = {}
     for seed in seeds:
-        cache_file = signal_fits_filename(toy_model, seed, n_toys_per_seed)
+        cache_file = get_spurious_signal_fits_cache_path(toy_model, seed, n_toys_per_seed)
         if not os.path.exists(cache_file):
             print(f"Cache file {cache_file} does not exist. Skipping.")
             continue
