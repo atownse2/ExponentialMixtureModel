@@ -3,7 +3,7 @@
 \usepackage{jheppub} % for details on the use of the package, please see the JINST-author-manual
 \usepackage{lineno}
 \usepackage{bm}
-\linenumbers
+% \linenumbers
 
 \arxivnumber{1234.56789} % if you have one
 
@@ -135,7 +135,7 @@ A foundational result in EVT, the Pickands--Balkema--de Haan theorem
 \cite{Picklands_1975, Balkema_Haan_1974} states that, beyond a sufficiently high threshold, the tails of a broad class of parent distributions converge to a Generalized Pareto Distribution 
 (GPD). This framework is highly attractive for new physics searches where signal regions lie in the extreme kinematic tails past dominant Standard Model resonances. Additionally, it may apply to scenarios where relevant Standard Model processes have already been accounted for, allowing the GPD to isolate and model the remaining non-resonant component. The GPD density is given by:
 \begin{equation}
-f(x | u, \sigma, \xi) = \frac{1}{\sigma} \left( 1 + \xi \frac{x - u}{\sigma} 
+f_{\text{GPD}}(x | u, \sigma, \xi) = \frac{1}{\sigma} \left( 1 + \xi \frac{x - u}{\sigma} 
 \right)^{-\left( \frac{1}{\xi} + 1 \right)}
 \end{equation}
 where $u$ is the lower threshold, $\sigma$ is the scale parameter, and $\xi$ is the shape 
@@ -235,7 +235,7 @@ where $x=m_{jj}/\sqrt{s}$ for the dijet invariant mass $m_{jj}$ and center-of-ma
 $\sqrt{s}=13$~TeV.
 Simpler versions of this function have been used in the past with $p_3=0$, but as datasets grow, these parameterizations must be extended. Because of this concern, ATLAS uses a sliding window fit method \cite{ATLAT_Dijet_sliding_window}, which reduces the fit range to the vicinity of the signal hypothesis being tested. For simplicity, we do not replicate this technique; instead fitting the entire spectrum at once.
 
-With the exception of the $x^{p_3\log x}$ term, the components of the dijet function correspond to distinct physical phenomena: the finite energy threshold ($(1-x)^{p_1}$) and approximate scale invariance ($x^{p_2}$). At sufficiently high energies, Standard Model quarks can be treated as massless, yielding a theory that is approximately scale-invariant up to the running of the strong coupling constant $\alpha_s$. While a finite exponential mixture is not inherently scale-invariant, it can approximate scale-invariant distributions like $x^{p_2}$ arbitrarily closely as the number of mixture components increases. Furthermore, although the exponential mixture does not explicitly model the finite energy threshold, it can still provide a reliable approximation depending on where the upper tail is truncated.
+With the exception of the $x^{p_3\log x}$ term, the components of the dijet function correspond to distinct physical phenomena: the finite energy threshold ($(1-x)^{p_1}$) and approximate scale invariance ($x^{p_2}$). At sufficiently high energies, Standard Model quarks can be treated as massless, yielding a theory that is approximately scale-invariant up to the running of the strong coupling constant $\alpha_s$. While a finite exponential mixture is not inherently scale-invariant, it can approximate scale-invariant distributions like $x^{p_2}$ (for $p_2<0$) arbitrarily closely as the number of mixture components increases. Furthermore, although the exponential mixture does not explicitly model the finite energy threshold, it can still provide a reliable approximation depending on where the upper tail is truncated.
 
 The dataset available on \texttt{HEPData} is binned. In high-energy physics, datasets can be very large, making fits to the unbinned data time-consuming. In such cases, it is common practice to bin the data finely enough to retain information, while coarsely enough that the fits converge in reasonable times.
 In this analysis the bin widths are determined by the dijet invariant mass resolution, which broadens at higher 
@@ -249,7 +249,7 @@ expected number of counts in bin $b$, given by:
 \begin{equation}
     n_{f,b} = \int_{b_-}^{b_+} f(m|\beta)\,dm,
 \end{equation}
-where $b_-$ and $b_+$ are the lower and upper edges of bin $b$.
+where $b_-$ and $b_+$ are the lower and upper edges of bin $b$. Crucially, because the finite exponential mixture is a linear combination of exponential functions, this integral evaluates analytically to a simple closed form. By providing the exact integral to the minimizer, we eliminate the need for computationally intensive numerical integration routines, ensuring that the binned likelihood evaluation is performant and numerically stable during minimization.
 
 The binning provided on \texttt{HEPData} includes only a single small-width bin following the 
 last bin with non-zero entries.
@@ -483,7 +483,7 @@ mixture may still provide a reasonable approximation.
 A more complete model could combine the exponential mixture with additional terms capturing 
 behavior near the upper limit. For instance, one could extend the traditional dijet function by keeping the $(1-m_{jj}/\sqrt{s})^{p_1}$ term to model the finite-energy cutoff (acting as a GPD with a fixed upper endpoint at $\sqrt{s}=13$ TeV) while generalizing the power-law component with the exponential mixture.
 
-When evaluating these mixtures, our framework shares similarities with methods where researchers utilize an extendable class of functions and rely on model selection to determine the ideal parameter count. When additional parameters have direct physical meaning, conservative test-based methods such as the likelihood ratio test can be more appropriate. Here, however, the simulation studies show that the metric that prefers more parameters performs better. In particular, AIC selects larger mixtures than BIC, and those fits have more zero-crossings in the bias curves, smaller bias, better coverage, and smaller spurious signal. A natural explanation is that, in contrast to flexible models like polynomials, the exponential mixture is sufficiently rigid that additional components primarily reduce underfitting rather than introducing overfitting. In this regime, where overfitting is well controlled, model selection metrics that are more liberal than AIC may yield further improvements.
+When evaluating these mixtures, our framework shares similarities with methods where researchers utilize an extendable class of functions and rely on model selection to determine the ideal parameter count. When additional parameters have direct physical meaning, conservative test-based methods such as the likelihood ratio test can be more appropriate. Here, however, the simulation studies (with $n=5036$) show that the metric that prefers more parameters performs better. In particular, AIC selects larger mixtures than BIC, and those fits have more zero-crossings in the bias curves, smaller bias, better coverage, and smaller spurious signal. A natural explanation is that, in contrast to flexible models like polynomials, the exponential mixture is sufficiently rigid that additional components primarily reduce underfitting rather than introducing overfitting. In this regime, where overfitting is well controlled, model selection metrics that are more liberal than AIC may yield further improvements.
 
 The exponential mixture is generally rigid enough to avoid most overfitting, though some 
 regions require additional care. Near the lower threshold in particular, the mixture can fit 
