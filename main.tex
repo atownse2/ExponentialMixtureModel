@@ -261,7 +261,7 @@ Accordingly, 80 random restarts per model are used, with 100 retries per fit.
 
 \begin{figure}
     \centering
-    \includegraphics[width=\linewidth]{dijet_model_selection.png}
+    \includegraphics[width=\linewidth]{figures/dijet_model_selection.png}
     \caption{Relative AIC (red dot) and BIC (blue x) scores for exponential mixtures on the ATLAS dijet 
     dataset for $k=3,4,5,6$ mixture components. The relative AIC/BIC is given by $\Delta\text{IC}_i=\text{IC}_i-\min(\text{IC})$ where $\text{IC}$ is either AIC or BIC.}
     \label{fig:dijet_AIC_BIC}
@@ -269,7 +269,7 @@ Accordingly, 80 random restarts per model are used, with 100 retries per fit.
 
 \begin{figure}[h]
     \centering
-    \includegraphics[width=\linewidth]{dijet_fit.png}
+    \includegraphics[width=\linewidth]{figures/dijet_fit.png}
     \caption{Fit of the dijet function and exponential mixture to the ATLAS Run~2 dijet dataset 
     (top) and normalized residuals (bottom).}
     \label{fig:dijet_fit}
@@ -326,7 +326,7 @@ Given the relatively small sample size, 20 random restarts with 5 retries each a
 
 \begin{figure}
     \centering
-    \includegraphics[width=\linewidth]{diphoton_model_selection.png}
+    \includegraphics[width=\linewidth]{figures/diphoton_model_selection.png}
     \caption{AIC (red dot) and BIC (blue x) scores for exponential mixtures on the CMS 
     high-mass diphoton dataset for $k=1,2,3,4$ mixture components. The relative AIC/BIC is given by $\Delta\text{IC}_i=\text{IC}_i-\min(\text{IC})$ where $\text{IC}$ is either AIC or BIC.}
     \label{fig:diphoton_model_selection}
@@ -334,7 +334,7 @@ Given the relatively small sample size, 20 random restarts with 5 retries each a
 
 \begin{figure}[h]
     \centering
-    \includegraphics[width=\linewidth]{diphoton_fit.png}
+    \includegraphics[width=\linewidth]{figures/diphoton_fit.png}
     \caption{Fit of the original functions and exponential mixture (AIC) to the CMS high-mass diphoton dataset (top) and normalized residuals (bottom). For visualization, the data and density functions are binned.}
     \label{fig:diphoton_fit}
 \end{figure}
@@ -394,7 +394,7 @@ The AIC-selected mixture also achieves among the smallest biases across the comp
 In the tails, the bias remains within the uncertainty of the true model and decreases at high mass.
 
 \begin{figure}[h!]
-\includegraphics[width=\textwidth]{bias.png}
+\includegraphics[width=\textwidth]{figures/bias.png}
 \caption{Relative bias ($B(x)$) of the estimated density for various functions. Each row represents 
 approximately $T=5000$ pseudo-datasets simulated from the true model with $n=5{,}036$ entries. 
 The shaded regions represent the $\pm1$ standard deviation band for the true model estimates.}
@@ -433,7 +433,7 @@ As in the bias study, AIC outperforms BIC. The AIC-selected exponential mixture 
 coverages among the functions considered.
 
 \begin{figure}[h!]
-\includegraphics[width=\textwidth]{coverage.png}
+\includegraphics[width=\textwidth]{figures/coverage.png}
 \caption{Coverage of the estimated density for various functions. Each row represents $T=400$ 
 pseudo-datasets simulated from the true model with $n=5{,}036$ entries. The 95\% confidence 
 interval is calculated using $B=1000$ bootstrap resamples.}
@@ -456,7 +456,7 @@ models. For consistent scale, we plot the signal yield $N_s$ divided by the Hess
 
 \begin{figure}
     \centering
-    \includegraphics[width=0.9\linewidth]{spurious_signal.png}
+    \includegraphics[width=0.9\linewidth]{figures/spurious_signal.png}
     \caption{Expected signal yield $S(x)$ for the data-generating functions 
     and the exponential mixtures. Each point represents the median over $T=1000$ pseudo-datasets; bands represent the 68\% interval and are displayed only for the true model and the 
     AIC-selected exponential mixture.
@@ -540,7 +540,7 @@ The custom code used to generate the results and figures in this manuscript is a
 
 %% [A] Recommended: using JHEP.bst file
 \bibliographystyle{JHEP}
-\bibliography{biblio.bib}
+\bibliography{main.bib}
 
 %% or
 %% [B] Manual formatting (see below)
