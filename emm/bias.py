@@ -12,7 +12,7 @@ from .models import (
     GaussianSignalModel,
     SignalPlusBackgroundModel,
 )
-from .fitting import fit_random_restarts, fit_n_times, train_test_split
+from .fitting import fit_random_restarts, fit_n_retries, train_test_split
 
 from tools import storage
 from tools import scale_out as so
@@ -22,7 +22,11 @@ bias_cache = storage.ensure_cache("bias")
 def get_bias_fits_cache_path(toy_model, seed, n_toys):
     return f"{bias_cache}/{toy_model.name}_seed{seed}_{n_toys}toys.pkl"
 
-def run_bias_fits(x, toy_model, model_primitives, seed, n_toys, n, grid) -> list[dict]:
+def run_bias_fits(
+        x, toy_model, model_primitives,
+        seed, n_toys, n, grid,
+        n_restarts=50, n_retries=20
+    ) -> list[dict]:
 
     # Set seed
     ROOT.RooRandom.randomGenerator().SetSeed(int(seed))
@@ -38,7 +42,7 @@ def run_bias_fits(x, toy_model, model_primitives, seed, n_toys, n, grid) -> list
             model = model_primitive(x)
             fit_result = fit_random_restarts(
                 x, toy_data, model_primitive,
-                seed, n_samples=20, n_retries=42,
+                seed, n_restarts=20, n_retries=42,
                 save=False,
             )
 
@@ -178,7 +182,7 @@ def run_bias_fits_CV(
             model = model_primitive(x)
             fit_result = fit_random_restarts(
                 x, toy_data, model_primitive,
-                seed, n_samples=8, n_retries=42,
+                seed, n_restarts=8, n_retries=42,
                 save=False,
             )
 
@@ -193,7 +197,7 @@ def run_bias_fits_CV(
             for i_fold, train_dataset, test_dataset in zip(range(n_folds), train_datasets, test_datasets):
                 cv_fit_result = fit_random_restarts(
                     x, train_dataset, model_primitive,
-                    seed, n_samples=20, n_retries=42,
+                    seed, n_restarts=20, n_retries=42,
                     save=False,
                 )
                 model.set_params(cv_fit_result["final_pars"])
@@ -425,7 +429,7 @@ def run_spurious_signal_fits(x_orig, toy_model, model_primitives, seed, n_toys, 
             # Fit the background model first to stabilize the fit
             bkg_fit_result = fit_random_restarts(
                 x, toy_data, model_primitive,
-                seed, n_samples=5, n_retries=5,
+                seed, n_restarts=5, n_retries=5,
                 save=False,
             )
             if bkg_fit_result is None:
@@ -448,7 +452,7 @@ def run_spurious_signal_fits(x_orig, toy_model, model_primitives, seed, n_toys, 
 
                 sig_model = GaussianSignalModel(x, sig_mean, sig_width)
                 model = SignalPlusBackgroundModel(sig_model, bkg_model, max_sig=max_sig)
-                result = fit_n_times(
+                result = fit_n_retries(
                     model, toy_data, n_attempts=5,
                     fit_options=[ROOT.RooFit.RecoverFromUndefinedRegions(1.0)]
                 )

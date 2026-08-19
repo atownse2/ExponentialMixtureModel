@@ -43,7 +43,7 @@ def run_coverage_fits(
             model = model_primitive(x)
             fit_result = fit_random_restarts(
                 x, bootstrapped_dataset, model_primitive,
-                seed, n_samples=10, n_retries=42,
+                seed, n_restarts=10, n_retries=42,
                 save=False,
             )
 

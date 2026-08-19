@@ -4,14 +4,15 @@ import pickle
 
 import numpy as np
 
-import ROOT
+import ROOT # type: ignore
 from array import array
 
 from tools import storage
+from tools import scale_out as so
 
 random_string = lambda: ''.join(random.choices('abcdefghijklmnopqrstuvwxyz', k=10))
 
-fit_options = [
+default_fit_options = [
     # ROOT.RooFit.IntegrateBins(0.0001),
     # ROOT.RooFit.PrintLevel(-1),
     # ROOT.RooFit.Offset(True),
@@ -39,25 +40,42 @@ def fit(model, data, fit_args=[], print_level=0):
 
     return fit_result
 
-def fit_n_times(model, data, n_attempts=5, fit_options=fit_options, print_level=0):
+def fit_n_retries(
+        model, data, n_retries,
+        fit_options=default_fit_options,
+        print_level=0
+    ):
     """
-    Fit a model to data, retrying up to n_attempts times if the fit fails
+    Fit a model to data, retrying up to n_retries times if the fit fails
     (fit status > 2). Returns the fit result if successful, or None if all attempts fail.
     """
     import ROOT
     if ROOT.RooFit.Save(True) not in fit_options:
         fit_options.append(ROOT.RooFit.Save(True))
-    for attempt in range(n_attempts):
+
+    initial_pars = {p.GetName(): p.getVal() for p in model.params()}
+
+    for i_retry in range(n_retries):
         fit_result = model.pdf.fitTo(
             data,
             *fit_options
         )
         if fit_result.status() <= 2:
-            if attempt > 0 and print_level > 0:
-                print(f"Fit succeeded after {attempt} retries")
-            return fit_result
+            if i_retry > 0 and print_level > 0:
+                print(f"Fit succeeded after {i_retry} retries")
+
+            final_pars = {p.GetName(): p.getVal() for p in model.params()}
+            result = {
+                "status": fit_result.status(),
+                "nll": fit_result.minNll(),
+                "initial_pars": initial_pars,
+                "final_pars": final_pars,
+                "n_retries": i_retry,
+            }
+            return result
+        
     if print_level > 0:
-        print(f"Fit failed after {n_attempts} attempts, returning None" )
+        print(f"Fit failed after {n_retries} attempts, returning None" )
     return None
 
 # Random restarts:
@@ -72,63 +90,77 @@ def random_restarts_filename(
     f = f"{fit_cache}/{tags}"
     return f
 
+def fit_random_restart(
+        x, data,
+        model_primitive,
+        i_seed,
+        n_retries=5,
+        fit_options=default_fit_options,
+        print_level=0,
+):
+    rng = np.random.default_rng(seed=i_seed)
+
+    model = model_primitive(x)
+    model.randomize_params(rng=rng)
+
+    fit_result = fit_n_retries(
+        model, data, n_retries,
+        fit_options=fit_options,
+        print_level=print_level
+    )
+
+    if fit_result is None:
+        if print_level > 0:
+            print(f"Random Restart {i_seed+1}: Fit failed after {n_retries} attempts.")
+        
+    del model  # Free memory
+    return fit_result
+
+
 def fit_random_restarts(
         x, data,
         model_primitive,
-        seed, n_samples,
+        seed, n_restarts,
         n_retries=5,
         save=True,
-        fit_options=fit_options,
+        fit_options=default_fit_options,
         print_level=0,
-        return_all_results=False
+        return_all_results=False,
     ):
 
-    best_nll = np.inf
-    fit_results = []
+    tasks = []
+    for i in range(n_restarts):
+        task = so.Task(
+            fit_random_restart,
+            x, data, model_primitive, seed+i,
+            n_retries=n_retries,
+            print_level=print_level,
+            fit_options=fit_options
+        )
+        tasks.append(task)
 
-    rng = np.random.default_rng(seed=seed)
-    for i in range(n_samples):
-        model = model_primitive(x)
-        model.randomize_params(rng=rng)
-        initial_pars = {p.GetName(): p.getVal() for p in model.params()}
-
-        fit_result = fit_n_times(model, data, n_attempts=n_retries, fit_options=fit_options, print_level=print_level)
-        if fit_result is None:
-            if print_level > 0:
-                print(f"Random Restart {i+1}/{n_samples}: Fit failed after {n_retries} attempts.")
-            continue
-
-        if fit_result.status() <= 2 and fit_result.minNll() < best_nll:
-            best_nll = fit_result.minNll()
-            fit_result = {
-                "nll": best_nll,
-                "initial_pars": initial_pars,
-                "final_pars": {p.GetName(): p.getVal() for p in model.params()}
-                }
-            fit_results.append(fit_result)
-        
-        del model  # Free memory
+    fit_results = so.run_tasks(tasks)
 
     if len(fit_results) == 0:
         print("No successful fits were found.")
         return None
     
-    if print_level > 0:
-        print(f"Random Restarts: {len(fit_results)} successful fits out of {n_samples} attempts.")
-        print(f"Best NLL: {best_nll:.3f}")
-
     if save:
         model = model_primitive(x)
-        fout = random_restarts_filename(model.name, data.GetName(), n_samples, seed)
+        fout = random_restarts_filename(model.name, data.GetName(), n_restarts, seed)
         with open(fout, "wb") as f:
             pickle.dump(fit_results, f)
 
     if return_all_results:
         return fit_results
-    else:
-        # Return the best fit result
-        best_fit_result = min(fit_results, key=lambda r: r["nll"])
-        return best_fit_result
+
+    # Return the best fit result
+    best_fit_result = min(fit_results, key=lambda r: r["nll"])
+    if print_level > 0:
+        print(f"Random Restarts: {len(fit_results)} successful fits out of {n_restarts} attempts.")
+        print(f"Best NLL: {best_fit_result['nll']}")
+
+    return best_fit_result
 
 # Goodness-of-fit metrics
 def compute_information_criteria(nll, n_params, n_observations):

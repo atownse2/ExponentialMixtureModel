@@ -197,18 +197,18 @@ class ModelPrimitive:
 
     def __init__(
         self,
-        model: RooFitModel,
+        model_cls: type[RooFitModel],
         *args: Any,
         name: Optional[str] = None,
         **kwargs: Any,
     ):
-        self.model = model
+        self.model_cls = model_cls
         self.args = args
         self.kwargs = kwargs
-        self.name = name if name is not None else getattr(model, "name", None)
+        self.name = name if name is not None else getattr(model_cls, "name", None)
 
     def __call__(self, x: Any) -> Any:
-        return self.model(x, *self.args, **self.kwargs)
+        return self.model_cls(x, *self.args, **self.kwargs)
 
 
 # Mixture model helper functions
